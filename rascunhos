@@ -1,0 +1,38 @@
+# COLETA DE DADOS
+
+As duas principais plataformas de letras de música no Brasil são Letras.com e Vagalume
+
+
+"
+Lançado em 2002, o Vagalume é o maior portal de música do Brasil. Além de ser muito conhecido pelas letras de músicas organizadas e catalogadas no site, o Vagalume tem também um grande acervo de discografias, traduções, cifras, fotos, estilos musicais, notícias, informações de biografia sobre os artistas, medidor de popularidade, cálculo de proximidade musical (de músicas e artistas) e tempo de sincronização de legendas das músicas.
+
+Todos os dias, milhares de informações são adicionadas e modificadas que são enviadas pelos próprios artistas, assessores de imprensa, fãs e gravadoras. O objetivo do Vagalume é organizar e divulgar artistas.
+
+O conteúdo organizado pelo Vagalume é colaborativo, sendo assim, se algum artista não quiser ser divulgado pelo Vagalume, pode a qualquer momento entrar em contato para ter o seu conteúdo removido.
+"
+
+https://api.vagalume.com.br/docs/
+
+
+
+Usei esse tutorial como base para o web scraping
+https://aneisse.com/post/20190210-music-data-scraping/20190210-music-data-scraping/
+
+
+
+Testei pegar as músicas da página de mais acessadas do Vagalume
+O problema é que a grande maioria é tradução de música em outro idioma
+Então preferi selecionar os gêneros mais "brasileiros" e coletar as 25 músicas mais acessadas dos artistas desses gêneros
+
+
+Uma limitação é que a definição de gênero é feito por artista e não por música
+
+
+
+
+
+# PROCESSAMENTO DE DADOS
+
+Peguei o pacote Compact Language Detector 3 (CLD3) do Google para conseguir filtrar por músicas em português
+Ainda preciso entender como tirar stopwords, números e pontuações
+
