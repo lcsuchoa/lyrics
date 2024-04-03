@@ -16,12 +16,12 @@ editor_options:
 source("src/utils.R")
 ```
 
-# Web scraping
+## Web scraping
 
 ```{r}
-genres <- c("bossa-nova", "forro", "funk-carioca", "gospel", "mpb")
+genres <- c("bossa-nova", "funk-carioca", "gospel", "mpb", "pagode", "sertanejo")
 
-all_artists_link <- future_map(genres, ~get_artist_link(.)) %>%
+all_artists_link <- future_map(genres, ~get_artist_link(.,15)) %>%
   unlist()
 ```
 
@@ -33,14 +33,13 @@ toc()
 # com 5 gêneros demorou 5min
 
 tic()
-all_songs <- future_map_dfr(all_artists_link, ~scrap_lyrics_link(.)) %>%
+all_songs <- future_map_dfr(all_artists_link, ~scrap_lyrics_link(.,5)) %>%
   filter(!is.na(Slink))
 toc()
 # com 5 gêneros demorou 2min
 
 tic()
-all_songs$Slyrics <- future_map_chr(all_songs$Slink, ~scrap_lyric(.)[1], .progress = TRUE) %>%
-  str_replace_all("\\. \\. ", ". ")
+all_songs$Slyrics <- future_map_chr(all_songs$Slink, ~scrap_lyric(.)[1], .progress = TRUE)
 toc()
 # com 5 gêneros demorou 30m
 
@@ -53,24 +52,49 @@ toc()
 # com 5 gêneros demorou 1s
 
 tic()
+data_songs$Slyrics <- data_songs$lyrics %>%
+  str_replace_all("\\. \\. ", ". ")
+toc()
+
+tic()
 data_songs <- data_songs %>%
   mutate(
     language = detect_language(lyrics),
     lyrics = gsub("\\d+", "", lyrics) %>% tolower() %>% gsub("[[:punct:]]", "", .)
   ) %>%
-  filter(language == "pt")
+  filter(language == "pt") %>%
+  select(-language)
 toc()
 # com 5 gêneros demorou 7s
 
 tic()
+write.csv(all_artists, "src/all_artists.csv")
 write.csv(all_songs, "src/all_songs.csv")
 write.csv(data_songs, "src/data_songs.csv")
 toc()
 # com 5 gêneros demorou 3s
 ```
 
+## Pacote 
+
 ```{r}
-all_songs <- read.csv("src/all_songs.csv")
-data_songs <- read.csv("src/data_songs.csv")
+exemplo <- "Contando aquela crise do meu amor adolescente, sinto uma coisa que não sei se explico bem, e é que as dores daquela quadra, a tal ponto se espiritualizaram com o tempo, que chegam a diluir-se no prazer. Não é claro isto, mas nem tudo é claro na vida ou nos livros. A verdade é que sinto um gosto particular em referir tal aborrecimento, quando é certo que ele me lembra outros que não quisera lembrar por nada."
+
+exemplo_2 <- get_tokens(exemplo)
+
+sentimentos_exemplo_df <- get_nrc_sentiment(exemplo_2, lang="portuguese")
+
+exemplo_2
+sentimentos_exemplo_df["palavra"] = exemplo_2
+
+print(sentimentos_exemplo_df, row.names = exemplo_2)
+```
+
+```{r}
+texto_palavras <- get_tokens(data_songs[1,3])
+sentimentos <- get_nrc_sentiment(texto_palavras, lang="portuguese")
+
+sentimentos["palavra"] = texto_palavras
+summary(sentimentos)
 ```
 

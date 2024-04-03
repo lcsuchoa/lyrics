@@ -7,13 +7,17 @@ require(tictoc)
 require(tm)
 require(tm.plugin.webmining)
 require(cld3)
+require(syuzhet)
+require(RColorBrewer)
+require(wordcloud)
+require(tm)
 
 
 genre_options <- c("bossa-nova", "forro", "funk-carioca", "gospel", "infantil",
                    "jovem-guarda", "mpb", "musicas-gauchas", "pagode", "regional",
                    "samba", "samba-enredo", "sertanejo", "velha-guarda")
 
-get_artist_link <- function(genre){
+get_artist_link <- function(genre, number){
 
   page <- read_html(paste0("https://www.vagalume.com.br/browse/style/", genre, ".html"))
   nameList <- page %>% html_nodes(".moreNamesContainer") %>% as_list()
@@ -23,7 +27,8 @@ get_artist_link <- function(genre){
     unlist(recursive = F) %>%
     unlist(recursive = F) %>%
     map(., ~attr(., "href")) %>%
-    unlist() %>% as.character()
+    unlist() %>% as.character() %>%
+    head(number)
   
   return(unique(artist_links))
 }
@@ -52,16 +57,16 @@ get_artist <- function(artist_link){
 scrap_artist <- possibly(get_artist, otherwise = tibble(Aname = NA,  Agenres = NA,  Asongs = NA,  Apopularity = NA,  Alink = NA))
 
 
-get_lyrics_link <- function(artist_link) {
+get_lyrics_link <- function(artist_link, number) {
   
   page <- read_html(paste0("https://www.vagalume.com.br", artist_link))
   music_name_node <- page %>% html_nodes(".nameMusic")
-  S <- music_name_node %>% html_text() %>% head(25)
-  L <- music_name_node %>% html_attr("href") %>% head(25)
+  S <- music_name_node %>% html_text() %>% head(number)
+  L <- music_name_node %>% html_attr("href") %>% head(number)
   
   res <- tibble(
-    Srank = 1:25,
-    Alink = rep(artist_link, 25),
+    Srank = 1:number,
+    Alink = rep(artist_link, number),
     Sname = S,
     Slink = L
   )
