@@ -11,6 +11,9 @@ require(syuzhet)
 require(RColorBrewer)
 require(wordcloud)
 require(tm)
+require(caret)
+require(text2vec)
+require(glmnet)
 
 
 genre_options <- c("bossa-nova", "forro", "funk-carioca", "gospel", "infantil",
@@ -102,3 +105,24 @@ remove_stopwords <- function(lyrics) {
   return(lyrics_without_stopwords)
 }
 
+
+syuzhet_classification <- function(lyrics, minimum) {
+  
+  tokens <- get_tokens(lyrics)
+  feelings <- get_nrc_sentiment(tokens, lang="portuguese")
+  
+  res <- data.frame(
+    anger = ifelse(mean(feelings$anger) >= minimum, 1, 0),
+    anticipation = ifelse(mean(feelings$anticipation) >= minimum, 1, 0),
+    disgust = ifelse(mean(feelings$disgust) >= minimum, 1, 0),
+    fear = ifelse(mean(feelings$fear) >= minimum, 1, 0),
+    joy = ifelse(mean(feelings$joy) >= minimum, 1, 0),
+    sadness = ifelse(mean(feelings$sadness) >= minimum, 1, 0),
+    surprise = ifelse(mean(feelings$surprise) >= minimum, 1, 0),
+    trust = ifelse(mean(feelings$trust) >= minimum, 1, 0),
+    negative = ifelse(mean(feelings$negative) >= minimum, 1, 0),
+    positive = ifelse(mean(feelings$positive) >= minimum, 1, 0)
+  )
+  
+  return(res)
+}

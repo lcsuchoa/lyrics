@@ -1,4 +1,13 @@
-# COLETA DE DADOS
+# INTRODUÇÃO
+
+
+# REVISÃO BIBLIOGRÁFICA
+
+
+
+# BASE DE DADOS
+
+## COLETA DE DADOS
 
 As duas principais plataformas de letras de música no Brasil são Letras.com e Vagalume
 
@@ -31,8 +40,24 @@ Uma limitação é que a definição de gênero é feito por artista e não por 
 
 
 
-# PROCESSAMENTO DE DADOS
+## PROCESSAMENTO DE DADOS
 
 Peguei o pacote Compact Language Detector 3 (CLD3) do Google para conseguir filtrar por músicas em português
 Ainda preciso entender como tirar stopwords, números e pontuações
+
+
+# METODOLOGIA
+
+
+
+# CHAT GPT
+prompt:
+Vou te passar letras de músicas e quero que você me responda apenas classificando cada música segundo esses sentimentos: Alegria, Antecipação, Confiança, Desgosto, Medo, Raiva, Surpresa e Tristeza, Positivo ou Negativo.
+Você pode selecionar quantos sentimentos achar necessário, dentre esses 10 listados.
+
+
+acontece de marcar alegria, negativo
+
+
+# RESULTADOS
 

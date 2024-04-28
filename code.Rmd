@@ -66,35 +66,191 @@ data_songs <- data_songs %>%
   select(-language)
 toc()
 # com 5 gêneros demorou 7s
+```
 
+```{r}
+# write.csv(all_artists, "src/all_artists.csv")
+# write.csv(all_songs, "src/all_songs.csv")
+# write.csv(data_songs, "src/data_songs.csv")
+```
+
+```{r}
+
+```
+
+## Gabarito
+
+```{r}
+data <- read.csv("src/data_gabarito.csv")
+
+gabarito <- data[1,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rename(sentimentos = 1) %>%
+  mutate(
+    anger = ifelse(grepl("Raiva", sentimentos), 1, 0),
+    anticipation = ifelse(grepl("Antecipação", sentimentos), 1, 0),
+    disgust = ifelse(grepl("Desgosto", sentimentos), 1, 0),
+    fear = ifelse(grepl("Medo", sentimentos), 1, 0),
+    joy = ifelse(grepl("Alegria", sentimentos), 1, 0),
+    sadness = ifelse(grepl("Tristeza", sentimentos), 1, 0),
+    surprise = ifelse(grepl("Surpresa", sentimentos), 1, 0),
+    trust = ifelse(grepl("Confiança", sentimentos), 1, 0),
+    negative = ifelse(grepl("Negativo", sentimentos), 1, 0),
+    positive = ifelse(grepl("Positivo", sentimentos), 1, 0),
+  ) %>%
+  select(-sentimentos)
+
+row.names(gabarito) <- NULL
+
+data_gabarito <- cbind(data_songs[1:100,], gabarito)
+```
+
+
+## Pacote syuzhet
+
+```{r}
 tic()
-write.csv(all_artists, "src/all_artists.csv")
-write.csv(all_songs, "src/all_songs.csv")
-write.csv(data_songs, "src/data_songs.csv")
+syuzhet <- future_map_dfr(data_songs$lyrics, ~syuzhet_classification(., 0.05))
+data_syuzhet <- cbind(data_songs, syuzhet)
 toc()
-# com 5 gêneros demorou 3s
-```
-
-## Pacote 
-
-```{r}
-exemplo <- "Contando aquela crise do meu amor adolescente, sinto uma coisa que não sei se explico bem, e é que as dores daquela quadra, a tal ponto se espiritualizaram com o tempo, que chegam a diluir-se no prazer. Não é claro isto, mas nem tudo é claro na vida ou nos livros. A verdade é que sinto um gosto particular em referir tal aborrecimento, quando é certo que ele me lembra outros que não quisera lembrar por nada."
-
-exemplo_2 <- get_tokens(exemplo)
-
-sentimentos_exemplo_df <- get_nrc_sentiment(exemplo_2, lang="portuguese")
-
-exemplo_2
-sentimentos_exemplo_df["palavra"] = exemplo_2
-
-print(sentimentos_exemplo_df, row.names = exemplo_2)
 ```
 
 ```{r}
-texto_palavras <- get_tokens(data_songs[1,3])
-sentimentos <- get_nrc_sentiment(texto_palavras, lang="portuguese")
-
-sentimentos["palavra"] = texto_palavras
-summary(sentimentos)
+data_syuzhet
 ```
+
+### Matriz de confusão
+
+```{r}
+data_gabarito_factor <- lapply(data_gabarito[1:100, 4:13], factor)
+data_syuzhet_factor <- lapply(data_syuzhet[1:100, 4:13], factor)
+
+confusionMatrix(unlist(data_syuzhet_factor), unlist(data_gabarito_factor))
+```
+
+
+## Chat GPT
+
+```{r}
+data <- read.csv("src/data_gpt.csv")
+
+gpt <- data[1,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rename(sentimentos = 1) %>%
+  mutate(
+    anger = ifelse(grepl("Raiva", sentimentos), 1, 0),
+    anticipation = ifelse(grepl("Antecipação", sentimentos), 1, 0),
+    disgust = ifelse(grepl("Desgosto", sentimentos), 1, 0),
+    fear = ifelse(grepl("Medo", sentimentos), 1, 0),
+    joy = ifelse(grepl("Alegria", sentimentos), 1, 0),
+    sadness = ifelse(grepl("Tristeza", sentimentos), 1, 0),
+    surprise = ifelse(grepl("Surpresa", sentimentos), 1, 0),
+    trust = ifelse(grepl("Confiança", sentimentos), 1, 0),
+    negative = ifelse(grepl("Negativo", sentimentos), 1, 0),
+    positive = ifelse(grepl("Positivo", sentimentos), 1, 0),
+  ) %>%
+  select(-sentimentos)
+
+row.names(gpt) <- NULL
+
+data_gpt <- cbind(data_songs[1:44,], gpt[1:44,])
+```
+
+### Matriz de confusão
+
+```{r}
+data_gabarito_factor <- lapply(data_gabarito[1:44, 4:13], factor)
+data_gpt_factor <- lapply(data_gpt[1:44, 4:13], factor)
+
+confusionMatrix(unlist(data_gpt_factor), unlist(data_gabarito_factor))
+```
+
+## Maritaka
+
+
+## Gemini
+
+
+## Modelo
+```{r}
+# Criar um iterador sobre os documentos
+it <- itoken(
+  data_songs$lyrics,
+  preprocessor = tolower,
+  tokenizer = word_tokenizer,
+  progressbar = FALSE)
+
+# Criar vocabulário
+vocab <- create_vocabulary(it)
+vectorizer <- vocab_vectorizer(vocab)
+
+# Criar Document-Term Matrix (DTM)
+dtm <- create_dtm(it, vectorizer)
+
+# Criar e ajustar o modelo TF-IDF
+tfidf_model <- TfIdf$new()
+dtm_tfidf <- fit_transform(dtm, tfidf_model)
+```
+
+```{r}
+# Preparar uma lista para armazenar os modelos
+models <- list()
+
+# Preparar uma matriz de features (X)
+# A matriz deve ser criada a partir dos vetores TF-IDF gerados anteriormente.
+# Por simplicidade, estou usando 'dtm_tfidf' como um nome de placeholder aqui.
+dtm_tfidf_subset <- dtm_tfidf[1:nrow(data_gabarito), ]
+X <- dtm_tfidf_subset
+
+# Iterar sobre cada emoção e criar um modelo
+for(emotion in names(data_gabarito)[4:13]) {
+  # A coluna atual é a variável resposta (Y)
+  Y <- data_gabarito[[emotion]]
+  
+  # Ajustar o modelo de regressão logística
+  fit <- cv.glmnet(x = X, y = Y, family = "binomial")
+  
+  # Armazenar o modelo
+  models[[emotion]] <- fit
+}
+
+```
+
+```{r}
+# Estrutura para armazenar resultados de avaliação
+evaluation_results <- data.frame(
+  Emotion = character(),
+  Accuracy = numeric(),
+  Sensitivity = numeric(),
+  Specificity = numeric(),
+  stringsAsFactors = FALSE
+)
+
+# Calcular previsões e métricas para cada modelo
+for(emotion in names(models)) {
+  # Fazer previsões no conjunto de teste
+  predictions <- predict(models[[emotion]], newx = test_matrix, s = "lambda.min", type = "class")
+  
+  # Obter a verdade real
+  actual <- test_data[[emotion]]
+  
+  # Calcular métricas de avaliação
+  confusion_matrix <- table(Predicted = predictions, Actual = actual)
+  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
+  sensitivity <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
+  specificity <- confusion_matrix[1, 1] / sum(confusion_matrix[1, ])
+  
+  # Armazenar resultados
+  evaluation_results <- rbind(evaluation_results, data.frame(
+    Emotion = emotion,
+    Accuracy = accuracy,
+    Sensitivity = sensitivity,
+    Specificity = specificity
+  ))
+}
+
+```
+
 
