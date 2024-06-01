@@ -16,66 +16,19 @@ editor_options:
 source("src/utils.R")
 ```
 
-## Web scraping
-
 ```{r}
-genres <- c("bossa-nova", "funk-carioca", "gospel", "mpb", "pagode", "sertanejo")
-
-all_artists_link <- future_map(genres, ~get_artist_link(.,15)) %>%
-  unlist()
-```
-
-```{r}
-tic()
-all_artists <- future_map_dfr(all_artists_link, ~scrap_artist(.)) %>%
-  filter(!is.na(Alink))
-toc()
-# com 5 gêneros demorou 5min
-
-tic()
-all_songs <- future_map_dfr(all_artists_link, ~scrap_lyrics_link(.,5)) %>%
-  filter(!is.na(Slink))
-toc()
-# com 5 gêneros demorou 2min
-
-tic()
-all_songs$Slyrics <- future_map_chr(all_songs$Slink, ~scrap_lyric(.)[1], .progress = TRUE)
-toc()
-# com 5 gêneros demorou 30m
-
-tic()
-data_songs <- all_songs %>%
-  select(Slink, Slyrics) %>%
-  rename(link = Slink, lyrics = Slyrics) %>%
-  unique()
-toc()
-# com 5 gêneros demorou 1s
-
-tic()
-data_songs$Slyrics <- data_songs$lyrics %>%
-  str_replace_all("\\. \\. ", ". ")
-toc()
-
-tic()
-data_songs <- data_songs %>%
+data_songs <- read.csv("src/all_songs.csv") %>%
+  select(-X) %>%
   mutate(
-    language = detect_language(lyrics),
-    lyrics = gsub("\\d+", "", lyrics) %>% tolower() %>% gsub("[[:punct:]]", "", .)
-  ) %>%
-  filter(language == "pt") %>%
-  select(-language)
-toc()
-# com 5 gêneros demorou 7s
-```
+    lyrics = Slyrics %>%
+      gsub("\\d+", "", .) %>%
+      tolower() %>%
+      gsub("[[:punct:]]", "", .) %>%
+      remove_stopwords() %>%
+      as.character()
+  )
 
-```{r}
-# write.csv(all_artists, "src/all_artists.csv")
-# write.csv(all_songs, "src/all_songs.csv")
-# write.csv(data_songs, "src/data_songs.csv")
-```
-
-```{r}
-
+data_artists <- read.csv("src/all_artists.csv")
 ```
 
 ## Gabarito
@@ -99,19 +52,122 @@ gabarito <- data[1,] %>%
     negative = ifelse(grepl("Negativo", sentimentos), 1, 0),
     positive = ifelse(grepl("Positivo", sentimentos), 1, 0),
   ) %>%
-  select(-sentimentos)
+  select(-sentimentos) %>%
+  mutate(across(everything(), as.factor))
 
 row.names(gabarito) <- NULL
+data_gabarito <- cbind(data_songs[1:100,], gabarito) %>%
+  mutate(
+    across(anger:positive, ~ as.numeric(as.character(.))),
+    lyrics = data_songs$lyrics[1:100]
+  )
 
-data_gabarito <- cbind(data_songs[1:100,], gabarito)
+rm(data, gabarito)
 ```
+
+```{r}
+data_gabarito
+```
+
+
+## Análise exploratória
+
+##### Frequência de músicas anotadas por sentimento
+```{r}
+data_gabarito %>%
+  reframe(across(anger:positive, sum)) %>%
+  pivot_longer(cols = everything(), names_to = "sentimento", values_to = "count") %>%
+  mutate(sentimento = labels_pt[sentimento]) %>%
+  arrange(desc(count)) %>%
+  mutate(sentimento = factor(sentimento, levels = sentimento)) %>%
+  ggplot(aes(x = sentimento, y = count)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  geom_text(aes(label = count), vjust = 2, size = 3, color = "white") + 
+  scale_y_continuous(limits = c(0, 100)) +
+  theme_minimal() +
+  labs(x = "", y = "Frequência", title = "") +
+  theme(axis.text.x = element_text())
+```
+
+##### Quantidade de músicas neutras
+```{r}
+data_gabarito %>%
+  select(anger:positive) %>%
+  filter(rowSums(.) == 0) %>%
+  count() %>%
+  as.numeric() %>%
+  cat("Quantidade de músicas neutras:", .)
+```
+
+##### Matriz de correlação entre sentimentos
+```{r}
+correlation_matrix <- cor(data_gabarito %>% select(anger:positive))
+hc <- hclust(dist(1 - correlation_matrix))
+ordered_matrix <- correlation_matrix[hc$order, hc$order]
+long_correlation_matrix <- melt(ordered_matrix)
+
+long_correlation_matrix %>%
+  ggplot(aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(name = "Correlação",  mid = "white",  high = "darkblue",
+                       low = "darkorange",  midpoint = 0, limit = c(-1, 1), 
+                       breaks = c(-1, -0.5, 0, 0.5, 1)) +
+  theme_minimal() +
+  labs(x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        axis.text.y = element_text(hjust = 1)) +
+  scale_x_discrete(labels = labels_pt) +
+  scale_y_discrete(labels = labels_pt)
+```
+
+##### Proporção de sentimentos por gênero
+```{r}
+data_gabarito %>%
+  left_join(data_artists, by="Alink") %>%
+  select(-c(X, Asongs, Apopularity)) %>%
+  distinct() %>%
+  separate_rows(Agenres, sep = ";\\s*") %>%
+  group_by(Agenres) %>%
+  reframe(
+    n = n(),
+    across(anger:positive, mean)
+  ) %>%
+  mutate(
+    total = anger+anticipation+disgust+fear+joy+sadness+surprise+trust+negative+positive,
+    across(anger:positive, ~ .x / total)
+  ) %>%
+  filter(n >= 15) %>%
+  arrange(desc(n)) %>%
+  pivot_longer(
+    cols = anger:positive,
+    names_to = "sentiment",
+    values_to = "percentage"
+  ) %>%
+  mutate(sentiment = factor(sentiment, levels = c("positive", "joy", "trust", "surprise", "anticipation", "fear", "anger", "sadness", "disgust", "negative"))) %>%
+  ggplot(aes(x = Agenres, y = percentage, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = scales::percent(percentage, accuracy = 1)), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", 
+            size = 3) +
+  scale_fill_manual(values = colorRampPalette(colors = c("darkblue", "darkgrey", "darkorange"))(10), labels = labels_pt) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Gênero", y = "Percentual do Sentimento", fill = "Sentimento") +
+  theme_minimal()
+```
+
+##### Principais palavras do TF-IDF por gênero
+```{r}
+```
+
 
 
 ## Pacote syuzhet
 
 ```{r}
 tic()
-syuzhet <- future_map_dfr(data_songs$lyrics, ~syuzhet_classification(., 0.05))
+syuzhet <- future_map_dfr(data_gabarito$lyrics, ~syuzhet_classification(., 0.05)) %>%
+  mutate(across(everything(), as.factor))
 data_syuzhet <- cbind(data_songs, syuzhet)
 toc()
 ```
@@ -123,134 +179,205 @@ data_syuzhet
 ### Matriz de confusão
 
 ```{r}
-data_gabarito_factor <- lapply(data_gabarito[1:100, 4:13], factor)
-data_syuzhet_factor <- lapply(data_syuzhet[1:100, 4:13], factor)
-
-confusionMatrix(unlist(data_syuzhet_factor), unlist(data_gabarito_factor))
+confusionMatrix(
+  unlist(data_syuzhet[1:100, "positive"]),
+  unlist(data_gabarito[1:100, "positive"] %>% as.factor())
+)
 ```
 
 
-## Chat GPT
 
+## TF IDF
 ```{r}
-data <- read.csv("src/data_gpt.csv")
+tfidf <- DocumentTermMatrix(data_gabarito$lyrics) %>% 
+  weightTfIdf() %>%
+  as.matrix() %>%
+  as.data.frame()
 
-gpt <- data[1,] %>%
-  t() %>%
-  as.data.frame() %>%
-  rename(sentimentos = 1) %>%
-  mutate(
-    anger = ifelse(grepl("Raiva", sentimentos), 1, 0),
-    anticipation = ifelse(grepl("Antecipação", sentimentos), 1, 0),
-    disgust = ifelse(grepl("Desgosto", sentimentos), 1, 0),
-    fear = ifelse(grepl("Medo", sentimentos), 1, 0),
-    joy = ifelse(grepl("Alegria", sentimentos), 1, 0),
-    sadness = ifelse(grepl("Tristeza", sentimentos), 1, 0),
-    surprise = ifelse(grepl("Surpresa", sentimentos), 1, 0),
-    trust = ifelse(grepl("Confiança", sentimentos), 1, 0),
-    negative = ifelse(grepl("Negativo", sentimentos), 1, 0),
-    positive = ifelse(grepl("Positivo", sentimentos), 1, 0),
-  ) %>%
-  select(-sentimentos)
+data_tfidf <- cbind(tfidf, data_gabarito %>% select(anger:positive))
+colnames(data_tfidf) <- clean_names(colnames(data_tfidf))
 
-row.names(gpt) <- NULL
-
-data_gpt <- cbind(data_songs[1:44,], gpt[1:44,])
-```
-
-### Matriz de confusão
-
-```{r}
-data_gabarito_factor <- lapply(data_gabarito[1:44, 4:13], factor)
-data_gpt_factor <- lapply(data_gpt[1:44, 4:13], factor)
-
-confusionMatrix(unlist(data_gpt_factor), unlist(data_gabarito_factor))
-```
-
-## Maritaka
-
-
-## Gemini
-
-
-## Modelo
-```{r}
-# Criar um iterador sobre os documentos
-it <- itoken(
-  data_songs$lyrics,
-  preprocessor = tolower,
-  tokenizer = word_tokenizer,
-  progressbar = FALSE)
-
-# Criar vocabulário
-vocab <- create_vocabulary(it)
-vectorizer <- vocab_vectorizer(vocab)
-
-# Criar Document-Term Matrix (DTM)
-dtm <- create_dtm(it, vectorizer)
-
-# Criar e ajustar o modelo TF-IDF
-tfidf_model <- TfIdf$new()
-dtm_tfidf <- fit_transform(dtm, tfidf_model)
+data_tfidf <- data_tfidf %>% mutate(positive = positive %>% as.factor())
+levels(data_tfidf$positive) <- c("No", "Yes")
 ```
 
 ```{r}
-# Preparar uma lista para armazenar os modelos
-models <- list()
+data_tfidf$positive
+```
 
-# Preparar uma matriz de features (X)
-# A matriz deve ser criada a partir dos vetores TF-IDF gerados anteriormente.
-# Por simplicidade, estou usando 'dtm_tfidf' como um nome de placeholder aqui.
-dtm_tfidf_subset <- dtm_tfidf[1:nrow(data_gabarito), ]
-X <- dtm_tfidf_subset
 
-# Iterar sobre cada emoção e criar um modelo
-for(emotion in names(data_gabarito)[4:13]) {
-  # A coluna atual é a variável resposta (Y)
-  Y <- data_gabarito[[emotion]]
-  
-  # Ajustar o modelo de regressão logística
-  fit <- cv.glmnet(x = X, y = Y, family = "binomial")
-  
-  # Armazenar o modelo
-  models[[emotion]] <- fit
-}
+## Random Forest
 
+```{r}
+set.seed(7)
+
+train_index <- createDataPartition(data_tfidf$positive, p = .3, list = FALSE, times = 1)
+
+train_data <- data_tfidf[train_index, ]
+test_data <- data_tfidf[-train_index, ]
 ```
 
 ```{r}
-# Estrutura para armazenar resultados de avaliação
-evaluation_results <- data.frame(
-  Emotion = character(),
-  Accuracy = numeric(),
-  Sensitivity = numeric(),
-  Specificity = numeric(),
-  stringsAsFactors = FALSE
+set.seed(7)
+
+rf_positive <- randomForest(positive ~ ., data = train_data, ntree = 500)
+predictions <- predict(rf_positive, test_data)
+confusionMatrix(predictions, test_data$positive)
+```
+
+## LOO
+
+```{r}
+set.seed(7)
+
+fit_control <- trainControl(
+  method = "LOOCV",
+  summaryFunction = defaultSummary,
+  classProbs = TRUE
 )
 
-# Calcular previsões e métricas para cada modelo
-for(emotion in names(models)) {
-  # Fazer previsões no conjunto de teste
-  predictions <- predict(models[[emotion]], newx = test_matrix, s = "lambda.min", type = "class")
-  
-  # Obter a verdade real
-  actual <- test_data[[emotion]]
-  
-  # Calcular métricas de avaliação
-  confusion_matrix <- table(Predicted = predictions, Actual = actual)
-  accuracy <- sum(diag(confusion_matrix)) / sum(confusion_matrix)
-  sensitivity <- confusion_matrix[2, 2] / sum(confusion_matrix[2, ])
-  specificity <- confusion_matrix[1, 1] / sum(confusion_matrix[1, ])
-  
-  # Armazenar resultados
-  evaluation_results <- rbind(evaluation_results, data.frame(
-    Emotion = emotion,
-    Accuracy = accuracy,
-    Sensitivity = sensitivity,
-    Specificity = specificity
-  ))
-}
+loo_positive <- caret::train(
+  positive ~ .,
+  data = data_tfidf,
+  method = "rf",
+  trControl = fit_control,
+  ntree = 100
+)
 
+print(loo_positive)
 ```
 
+
+## Nova Otimização Bayesiana
+
+```{r}
+# Definindo o espaço de parâmetros
+param_space <- makeParamSet(
+  makeIntegerParam("mtry", lower = 2, upper = sqrt(ncol(data_tfidf) - 11)), # Ajustar conforme o número de features
+  makeIntegerParam("ntree", lower = 50, upper = 500),
+  makeIntegerParam("min.node.size", lower = 1, upper = 10)
+)
+
+# Função objetivo para otimização
+objective_function <- makeSingleObjectiveFunction(
+  fn = function(x) {
+    set.seed(7)
+    # Ajuste aqui para garantir que x é tratado como lista
+    param_grid <- data.frame(mtry = x[["mtry"]], ntree = x[["ntree"]], min.node.size = x[["min.node.size"]])
+    
+    model <- train(
+      positive ~ ., 
+      data = data_tfidf,
+      method = "rf",
+      trControl = trainControl(
+        method = "LOOCV",
+        summaryFunction = defaultSummary,
+        classProbs = TRUE,
+        savePredictions = "final"
+      ),
+      tuneGrid = param_grid
+    )
+    # Usa o desempenho do modelo para guiar a otimização
+    return(max(model$results$Accuracy))
+  },
+  par.set = param_space,
+  minimize = FALSE  # Maximizar a acurácia
+)
+
+# Configuração da otimização bayesiana
+control <- makeMBOControl()
+control <- setMBOControlTermination(control, iters = 20)
+control <- setMBOControlInfill(control, crit = makeMBOInfillCritEI())
+
+# Definindo o modelo surrogate adequado
+surrogate_learner <- makeLearner("regr.km", predict.type = "se")
+
+# Executando a otimização bayesiana
+opt_result <- mbo(
+  objective_function,
+  control = control,
+  learner = surrogate_learner,
+  show.info = TRUE
+)
+
+# Melhores parâmetros encontrados
+opt_result$x
+
+# Treinando o modelo final com os melhores parâmetros
+final_model <- train(
+  positive ~ .,
+  data = data_tfidf,
+  method = "rf",
+  trControl = trainControl(
+    method = "LOOCV",
+    summaryFunction = defaultSummary,
+    classProbs = TRUE,
+    savePredictions = "final"
+  ),
+  tuneGrid = data.frame(
+    mtry = opt_result$x$mtry,
+    ntree = opt_result$x$ntree,
+    min.node.size = opt_result$x$min.node.size
+  )
+)
+
+print(final_model)
+```
+
+
+## Otimização Bayesiana Teste
+
+```{r}
+search_space <- ParamSet$new(list(
+    ParamInt$new("mtry", lower = 1, upper = data_tfidf %>% ncol() %>% sqrt() %>% floor()),
+    ParamInt$new("num.trees", lower = 50, upper = 500),
+    ParamInt$new("min.node.size", lower = 1, upper = 10)
+))
+
+task <- TaskClassif$new("my_task", backend = data_tfidf, target = "positive")
+learner <- lrn("classif.ranger", predict_type = "prob")
+```
+
+```{r}
+auto_tuner <- AutoTuner$new(
+    learner = learner,
+    resampling = rsmp("cv", folds = 5),  # Validação cruzada com 5 folds
+    measure = msr("classif.acc"),        # Medida de desempenho: Acurácia
+    search_space = search_space,
+    terminator = trm("evals", n_evals = 50),  # Condição de parada após 50 avaliações
+    tuner = tnr("mbo")  # Otimização Bayesiana
+)
+```
+
+```{r}
+auto_tuner$train(task)
+```
+
+```{r}
+archive_data <- auto_tuner$archive$data
+if (!is.null(archive_data)) {
+    print(archive_data)
+} else {
+    print("Dados de arquivo estão nulos.")
+}
+```
+
+```{r}
+best_index <- which.max(archive_data$classif.acc)
+best_params <- archive_data[best_index, ]
+print(best_params)
+```
+
+
+#### Comparação de resultados
+```{r}
+learner$param_set$values <- best_params
+learner$train(task)
+
+resampling <- rsmp("cv", folds = 5)
+measure <- msr("classif.acc")
+
+resampling_results <- resampling$score(learner, task, measure)
+print(resampling_results)
+```
 

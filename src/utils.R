@@ -14,11 +14,37 @@ require(tm)
 require(caret)
 require(text2vec)
 require(glmnet)
-
+require(text)
+require(stringi)
+require(mlr3)
+require(mlr3tuning)
+require(mlr3mbo)
+require(mlr3learners)
+require(ranger)
+require(DiceKriging)
+require(rgenoud)
+require(pROC)
+require(reshape2)
+require(mlrMBO)
+require(ParamHelpers)
+require(mlr)
 
 genre_options <- c("bossa-nova", "forro", "funk-carioca", "gospel", "infantil",
                    "jovem-guarda", "mpb", "musicas-gauchas", "pagode", "regional",
                    "samba", "samba-enredo", "sertanejo", "velha-guarda")
+
+labels_pt <- c(
+  "anger" = "raiva",
+  "anticipation" = "antecipação",
+  "disgust" = "desgosto",
+  "fear" = "medo",
+  "joy" = "alegria",
+  "negative" = "negativo",
+  "positive" = "positivo",
+  "sadness" = "tristeza",
+  "surprise" = "surpresa",
+  "trust" = "confiança"
+)
 
 get_artist_link <- function(genre, number){
 
@@ -94,15 +120,16 @@ get_lyric <- function(song_link) {
 scrap_lyric <- possibly(get_lyric, otherwise = NA)
 
 
-remove_stopwords <- function(lyrics) {
+remove_stopwords <- function(text_column) {
+  stopwords_br <- c(stopwords("pt"), "é", "tá", "tô", "pra", "pro", "ô", "ai")
   
-  stopwords_pt <- tm::stopwords("portuguese")
+  remove_stopwords_from_text <- function(text) {
+    words <- unlist(strsplit(text, "\\s+"))
+    words <- words[!tolower(words) %in% stopwords_br]
+    return(paste(words, collapse = " "))
+  }
   
-  tokens <- unlist(strsplit(tolower(lyrics), "\\W+"))
-  tokens_without_stopwords <- tokens[!tokens %in% tm::stopwords("portuguese")]
-  lyrics_without_stopwords <- paste(tokens_without_stopwords, collapse = " ")
-  
-  return(lyrics_without_stopwords)
+  sapply(text_column, remove_stopwords_from_text)
 }
 
 
@@ -126,3 +153,16 @@ syuzhet_classification <- function(lyrics, minimum) {
   
   return(res)
 }
+
+
+clean_names <- function(names) {
+  clean_names <- stri_trans_general(names, "Latin-ASCII")
+  clean_names <- gsub("[^[:alnum:]_]", "", clean_names)
+
+  clean_names <- make.names(clean_names)
+  unique_names <- make.unique(clean_names, sep = "_")
+  
+  return(unique_names)
+}
+
+
