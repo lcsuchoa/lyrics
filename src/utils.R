@@ -28,6 +28,10 @@ require(reshape2)
 require(mlrMBO)
 require(ParamHelpers)
 require(mlr)
+require(tidymodels)
+require(finetune)
+require(tune)
+
 
 genre_options <- c("bossa-nova", "forro", "funk-carioca", "gospel", "infantil",
                    "jovem-guarda", "mpb", "musicas-gauchas", "pagode", "regional",
@@ -121,7 +125,7 @@ scrap_lyric <- possibly(get_lyric, otherwise = NA)
 
 
 remove_stopwords <- function(text_column) {
-  stopwords_br <- c(stopwords("pt"), "é", "tá", "tô", "pra", "pro", "ô", "ai")
+  stopwords_br <- c(stopwords("pt"), "é", "tá", "tô", "pra", "pro", "ô", "ai", "refrao", "refrão", "estrofe")
   
   remove_stopwords_from_text <- function(text) {
     words <- unlist(strsplit(text, "\\s+"))

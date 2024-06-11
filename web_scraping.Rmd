@@ -24,37 +24,22 @@ all_artists_link <- future_map(genres, ~get_artist_link(.,15)) %>%
 ```
 
 ```{r}
-tic()
 all_artists <- future_map_dfr(all_artists_link, ~scrap_artist(.)) %>%
   filter(!is.na(Alink))
-toc()
-# com 5 gêneros demorou 5min
 
-tic()
 all_songs <- future_map_dfr(all_artists_link, ~scrap_lyrics_link(.,5)) %>%
   filter(!is.na(Slink))
-toc()
-# com 5 gêneros demorou 2min
 
-tic()
 all_songs$Slyrics <- future_map_chr(all_songs$Slink, ~scrap_lyric(.)[1], .progress = TRUE)
-toc()
-# com 5 gêneros demorou 30m
 
-tic()
 data_songs <- all_songs %>%
   select(Slink, Slyrics) %>%
   rename(link = Slink, lyrics = Slyrics) %>%
   unique()
-toc()
-# com 5 gêneros demorou 1s
 
-tic()
 data_songs$Slyrics <- data_songs$lyrics %>%
   str_replace_all("\\. \\. ", ". ")
-toc()
 
-tic()
 data_songs <- data_songs %>%
   mutate(
     language = detect_language(lyrics),
@@ -63,8 +48,6 @@ data_songs <- data_songs %>%
   ) %>%
   filter(language == "pt") %>%
   select(-language)
-toc()
-# com 5 gêneros demorou 7s
 ```
 
 ```{r}

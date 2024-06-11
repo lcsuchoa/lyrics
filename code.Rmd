@@ -56,17 +56,23 @@ gabarito <- data[1,] %>%
   mutate(across(everything(), as.factor))
 
 row.names(gabarito) <- NULL
-data_gabarito <- cbind(data_songs[1:100,], gabarito) %>%
+data_gabarito <- cbind(data_songs, gabarito) %>%
   mutate(
     across(anger:positive, ~ as.numeric(as.character(.))),
-    lyrics = data_songs$lyrics[1:100]
-  )
+    lyrics = data_songs$lyrics
+  ) %>%
+  distinct(Slink, .keep_all = TRUE)
 
 rm(data, gabarito)
 ```
 
 ```{r}
-data_gabarito
+data_gabarito %>%
+  filter(rowSums((data_gabarito %>% select(anger:positive)) != 0) > 0)
+```
+
+```{r}
+data_songs <- data_songs %>% distinct(Slink, .keep_all = TRUE)
 ```
 
 
@@ -83,20 +89,10 @@ data_gabarito %>%
   ggplot(aes(x = sentimento, y = count)) +
   geom_bar(stat = "identity", fill = "darkblue") +
   geom_text(aes(label = count), vjust = 2, size = 3, color = "white") + 
-  scale_y_continuous(limits = c(0, 100)) +
+  scale_y_continuous(limits = c(0, 300)) +
   theme_minimal() +
   labs(x = "", y = "Frequência", title = "") +
   theme(axis.text.x = element_text())
-```
-
-##### Quantidade de músicas neutras
-```{r}
-data_gabarito %>%
-  select(anger:positive) %>%
-  filter(rowSums(.) == 0) %>%
-  count() %>%
-  as.numeric() %>%
-  cat("Quantidade de músicas neutras:", .)
 ```
 
 ##### Matriz de correlação entre sentimentos
@@ -118,6 +114,8 @@ long_correlation_matrix %>%
         axis.text.y = element_text(hjust = 1)) +
   scale_x_discrete(labels = labels_pt) +
   scale_y_discrete(labels = labels_pt)
+
+rm(correlation_matrix, hc, ordered_matrix, long_correlation_matrix)
 ```
 
 ##### Proporção de sentimentos por gênero
@@ -136,7 +134,7 @@ data_gabarito %>%
     total = anger+anticipation+disgust+fear+joy+sadness+surprise+trust+negative+positive,
     across(anger:positive, ~ .x / total)
   ) %>%
-  filter(n >= 15) %>%
+  filter(n >= 20) %>%
   arrange(desc(n)) %>%
   pivot_longer(
     cols = anger:positive,
@@ -156,35 +154,70 @@ data_gabarito %>%
   theme_minimal()
 ```
 
-##### Principais palavras do TF-IDF por gênero
-```{r}
-```
-
-
 
 ## Pacote syuzhet
 
+[!] Como definir o valor de corte?
+
 ```{r}
-tic()
 syuzhet <- future_map_dfr(data_gabarito$lyrics, ~syuzhet_classification(., 0.05)) %>%
   mutate(across(everything(), as.factor))
 data_syuzhet <- cbind(data_songs, syuzhet)
-toc()
-```
-
-```{r}
-data_syuzhet
 ```
 
 ### Matriz de confusão
 
 ```{r}
 confusionMatrix(
-  unlist(data_syuzhet[1:100, "positive"]),
-  unlist(data_gabarito[1:100, "positive"] %>% as.factor())
+  unlist(data_syuzhet[, "positive"]),
+  unlist(data_gabarito[, "positive"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "negative"]),
+  unlist(data_gabarito[, "negative"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "anger"]),
+  unlist(data_gabarito[, "anger"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "anticipation"]),
+  unlist(data_gabarito[, "anticipation"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "disgust"]),
+  unlist(data_gabarito[, "disgust"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "fear"]),
+  unlist(data_gabarito[, "fear"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "joy"]),
+  unlist(data_gabarito[, "joy"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "sadness"]),
+  unlist(data_gabarito[, "sadness"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "surprise"]),
+  unlist(data_gabarito[, "surprise"] %>% as.factor())
+)
+
+confusionMatrix(
+  unlist(data_syuzhet[, "trust"]),
+  unlist(data_gabarito[, "trust"] %>% as.factor())
 )
 ```
-
 
 
 ## TF IDF
@@ -197,187 +230,1365 @@ tfidf <- DocumentTermMatrix(data_gabarito$lyrics) %>%
 data_tfidf <- cbind(tfidf, data_gabarito %>% select(anger:positive))
 colnames(data_tfidf) <- clean_names(colnames(data_tfidf))
 
-data_tfidf <- data_tfidf %>% mutate(positive = positive %>% as.factor())
-levels(data_tfidf$positive) <- c("No", "Yes")
-```
-
-```{r}
-data_tfidf$positive
+data_tfidf <- data_tfidf %>%
+  mutate(across((ncol(data_tfidf)-9):ncol(data_tfidf), ~ as.factor(ifelse(. > 0.5, "Yes", "No"))))
 ```
 
 
 ## Random Forest
 
+### Positivo
 ```{r}
 set.seed(7)
 
-train_index <- createDataPartition(data_tfidf$positive, p = .3, list = FALSE, times = 1)
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(positive)
+model_data <- bind_cols(tfidf_cols, response_col)
 
-train_data <- data_tfidf[train_index, ]
-test_data <- data_tfidf[-train_index, ]
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(positive ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = positive, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = positive, estimate = .pred_class)
+print(conf_matrix)
 ```
 
+
+### Negativo
 ```{r}
 set.seed(7)
 
-rf_positive <- randomForest(positive ~ ., data = train_data, ntree = 500)
-predictions <- predict(rf_positive, test_data)
-confusionMatrix(predictions, test_data$positive)
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(negative)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(negative ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = negative, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = negative, estimate = .pred_class)
+print(conf_matrix)
 ```
 
-## LOO
-
+### Raiva
 ```{r}
 set.seed(7)
 
-fit_control <- trainControl(
-  method = "LOOCV",
-  summaryFunction = defaultSummary,
-  classProbs = TRUE
-)
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
 
-loo_positive <- caret::train(
-  positive ~ .,
-  data = data_tfidf,
-  method = "rf",
-  trControl = fit_control,
-  ntree = 100
-)
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
 
-print(loo_positive)
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(anger ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = anger, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = anger, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Antecipação
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(anticipation)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(anticipation ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = anticipation, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = anticipation, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Desgosto
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(disgust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(disgust ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = disgust, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = disgust, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Medo
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(fear)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(fear ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = fear, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = fear, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Alegria
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(joy)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(joy ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = joy, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = joy, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Tristeza
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(sadness)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(sadness ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = sadness, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = sadness, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Surpresa
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(surprise)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(surprise ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = surprise, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = surprise, estimate = .pred_class)
+print(conf_matrix)
+```
+
+### Confiança
+```{r}
+set.seed(7)
+
+# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(trust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# Separar os dados em treino e teste
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar o modelo de random forest
+rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
+  set_engine("ranger")
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(trust ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Treinar o modelo
+rf_fit <- wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+predictions <- rf_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
+
+# Avaliar o modelo com as métricas personalizadas
+custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
+final_metrics <- custom_metrics(predictions, truth = trust, estimate = .pred_class, .pred_Yes)
+print(final_metrics)
+
+# Calcular a matriz de confusão
+conf_matrix <- conf_mat(predictions, truth = trust, estimate = .pred_class)
+print(conf_matrix)
 ```
 
 
-## Nova Otimização Bayesiana
 
+
+## Otimização Bayesiana
+
+### Positivo
 ```{r}
-# Definindo o espaço de parâmetros
-param_space <- makeParamSet(
-  makeIntegerParam("mtry", lower = 2, upper = sqrt(ncol(data_tfidf) - 11)), # Ajustar conforme o número de features
-  makeIntegerParam("ntree", lower = 50, upper = 500),
-  makeIntegerParam("min.node.size", lower = 1, upper = 10)
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(positive)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(positive ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
 )
 
-# Função objetivo para otimização
-objective_function <- makeSingleObjectiveFunction(
-  fn = function(x) {
-    set.seed(7)
-    # Ajuste aqui para garantir que x é tratado como lista
-    param_grid <- data.frame(mtry = x[["mtry"]], ntree = x[["ntree"]], min.node.size = x[["min.node.size"]])
-    
-    model <- train(
-      positive ~ ., 
-      data = data_tfidf,
-      method = "rf",
-      trControl = trainControl(
-        method = "LOOCV",
-        summaryFunction = defaultSummary,
-        classProbs = TRUE,
-        savePredictions = "final"
-      ),
-      tuneGrid = param_grid
-    )
-    # Usa o desempenho do modelo para guiar a otimização
-    return(max(model$results$Accuracy))
-  },
-  par.set = param_space,
-  minimize = FALSE  # Maximizar a acurácia
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
 )
 
-# Configuração da otimização bayesiana
-control <- makeMBOControl()
-control <- setMBOControlTermination(control, iters = 20)
-control <- setMBOControlInfill(control, crit = makeMBOInfillCritEI())
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
 
-# Definindo o modelo surrogate adequado
-surrogate_learner <- makeLearner("regr.km", predict.type = "se")
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
 
-# Executando a otimização bayesiana
-opt_result <- mbo(
-  objective_function,
-  control = control,
-  learner = surrogate_learner,
-  show.info = TRUE
-)
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
 
-# Melhores parâmetros encontrados
-opt_result$x
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
 
-# Treinando o modelo final com os melhores parâmetros
-final_model <- train(
-  positive ~ .,
-  data = data_tfidf,
-  method = "rf",
-  trControl = trainControl(
-    method = "LOOCV",
-    summaryFunction = defaultSummary,
-    classProbs = TRUE,
-    savePredictions = "final"
-  ),
-  tuneGrid = data.frame(
-    mtry = opt_result$x$mtry,
-    ntree = opt_result$x$ntree,
-    min.node.size = opt_result$x$min.node.size
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = positive, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = positive, .pred_Yes),
+    final_predictions %>% f_meas(truth = positive, estimate = .pred_class),
+    final_predictions %>% precision(truth = positive, estimate = .pred_class),
+    final_predictions %>% recall(truth = positive, estimate = .pred_class)
   )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
+```
+
+### Negativo
+```{r}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(negative)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(negative ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
 )
 
-print(final_model)
-```
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
 
-
-## Otimização Bayesiana Teste
-
-```{r}
-search_space <- ParamSet$new(list(
-    ParamInt$new("mtry", lower = 1, upper = data_tfidf %>% ncol() %>% sqrt() %>% floor()),
-    ParamInt$new("num.trees", lower = 50, upper = 500),
-    ParamInt$new("min.node.size", lower = 1, upper = 10)
-))
-
-task <- TaskClassif$new("my_task", backend = data_tfidf, target = "positive")
-learner <- lrn("classif.ranger", predict_type = "prob")
-```
-
-```{r}
-auto_tuner <- AutoTuner$new(
-    learner = learner,
-    resampling = rsmp("cv", folds = 5),  # Validação cruzada com 5 folds
-    measure = msr("classif.acc"),        # Medida de desempenho: Acurácia
-    search_space = search_space,
-    terminator = trm("evals", n_evals = 50),  # Condição de parada após 50 avaliações
-    tuner = tnr("mbo")  # Otimização Bayesiana
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
 )
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = negative, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = negative, .pred_Yes),
+    final_predictions %>% f_meas(truth = negative, estimate = .pred_class),
+    final_predictions %>% precision(truth = negative, estimate = .pred_class),
+    final_predictions %>% recall(truth = negative, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
 ```
 
+### Raiva
 ```{r}
-auto_tuner$train(task)
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(anger ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = anger, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = anger, .pred_Yes),
+    final_predictions %>% f_meas(truth = anger, estimate = .pred_class),
+    final_predictions %>% precision(truth = anger, estimate = .pred_class),
+    final_predictions %>% recall(truth = anger, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
 ```
 
+### Antecipação
 ```{r}
-archive_data <- auto_tuner$archive$data
-if (!is.null(archive_data)) {
-    print(archive_data)
-} else {
-    print("Dados de arquivo estão nulos.")
-}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(anticipation)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(anticipation ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = anticipation, .pred_Yes),
+    final_predictions %>% f_meas(truth = anticipation, estimate = .pred_class),
+    final_predictions %>% precision(truth = anticipation, estimate = .pred_class),
+    final_predictions %>% recall(truth = anticipation, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
 ```
 
+### Desgosto
 ```{r}
-best_index <- which.max(archive_data$classif.acc)
-best_params <- archive_data[best_index, ]
-print(best_params)
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(disgust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(disgust ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = disgust, .pred_Yes),
+    final_predictions %>% f_meas(truth = disgust, estimate = .pred_class),
+    final_predictions %>% precision(truth = disgust, estimate = .pred_class),
+    final_predictions %>% recall(truth = disgust, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
 ```
 
-
-#### Comparação de resultados
+### Medo
 ```{r}
-learner$param_set$values <- best_params
-learner$train(task)
+set.seed(7)
 
-resampling <- rsmp("cv", folds = 5)
-measure <- msr("classif.acc")
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(fear)
+model_data <- bind_cols(tfidf_cols, response_col)
 
-resampling_results <- resampling$score(learner, task, measure)
-print(resampling_results)
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(fear ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = fear, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = fear, .pred_Yes),
+    final_predictions %>% f_meas(truth = fear, estimate = .pred_class),
+    final_predictions %>% precision(truth = fear, estimate = .pred_class),
+    final_predictions %>% recall(truth = fear, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
 ```
 
+### Alegria
+```{r}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(joy)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(joy ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = joy, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = joy, .pred_Yes),
+    final_predictions %>% f_meas(truth = joy, estimate = .pred_class),
+    final_predictions %>% precision(truth = joy, estimate = .pred_class),
+    final_predictions %>% recall(truth = joy, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
+```
+
+### Tristeza
+```{r}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(sadness)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(sadness ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = sadness, .pred_Yes),
+    final_predictions %>% f_meas(truth = sadness, estimate = .pred_class),
+    final_predictions %>% precision(truth = sadness, estimate = .pred_class),
+    final_predictions %>% recall(truth = sadness, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
+```
+
+### Surpresa
+```{r}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(surprise)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(surprise ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = surprise, .pred_Yes),
+    final_predictions %>% f_meas(truth = surprise, estimate = .pred_class),
+    final_predictions %>% precision(truth = surprise, estimate = .pred_class),
+    final_predictions %>% recall(truth = surprise, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
+```
+
+### Confiança
+```{r}
+set.seed(7)
+
+tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
+response_col <- data_tfidf %>% select(trust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+# Especificar a receita de pré-processamento
+recipe <- recipe(trust ~ ., data = train_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+
+# Definir o modelo com hiperparâmetros a serem otimizados
+rf_model <- rand_forest(
+  mode = "classification",
+  trees = tune(),
+  mtry = tune(),
+  min_n = tune()
+) %>% 
+  set_engine("ranger")
+
+# Criar o fluxo de trabalho
+wf <- workflow() %>%
+  add_recipe(recipe) %>%
+  add_model(rf_model)
+
+# Definir a grade de hiperparâmetros
+rf_grid <- parameters(
+  trees(range = c(500, 2000)),
+  mtry(range = c(1, ncol(train_data) - 1)),
+  min_n(range = c(1, 10))
+)
+
+# Definir a estratégia de resampling
+cv_folds <- vfold_cv(train_data, v = 5)
+
+# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_bayes(
+  wf,
+  resamples = cv_folds,
+  param_info = rf_grid,
+  iter = 50,
+  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  control = control_bayes(verbose = TRUE)
+)
+
+# Selecionar o melhor conjunto de hiperparâmetros
+best_params <- select_best(tune_results, metric = "accuracy")
+
+# Ajustar o melhor modelo
+final_rf_model <- finalize_model(rf_model, best_params)
+
+# Atualizar o workflow com os melhores hiperparâmetros
+final_wf <- wf %>%
+  finalize_workflow(best_params)
+
+# Treinar o modelo final
+final_fit <- final_wf %>%
+  fit(data = train_data)
+
+# Fazer previsões no conjunto de teste
+final_predictions <- final_fit %>%
+  predict(new_data = test_data, type = "prob") %>%
+  bind_cols(test_data) %>%
+  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+
+# Avaliar o modelo final
+final_metrics <- final_predictions %>%
+  metrics(truth = trust, estimate = .pred_class) %>%
+  bind_rows(
+    final_predictions %>% roc_auc(truth = trust, .pred_Yes),
+    final_predictions %>% f_meas(truth = trust, estimate = .pred_class),
+    final_predictions %>% precision(truth = trust, estimate = .pred_class),
+    final_predictions %>% recall(truth = trust, estimate = .pred_class)
+  )
+
+# Mostrar as métricas de avaliação
+print(final_metrics)
+
+```
