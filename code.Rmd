@@ -1,5 +1,5 @@
 ---
-title: "Explorando padrões de letras de músicas por meio de análise de cluster e otimização bayesiana"
+title: "Classificação de emoções e sentimentos em letras musicais usando Floresta Aleatória e Otimização Bayesiana"
 date: "Última atualização em `r format(Sys.time(), '%d %B, %Y')`"
 output:
   html_document:
@@ -16,6 +16,8 @@ editor_options:
 source("src/utils.R")
 ```
 
+## Leitura dos dados
+
 ```{r}
 data_songs <- read.csv("src/all_songs.csv") %>%
   select(-X) %>%
@@ -31,9 +33,7 @@ data_songs <- read.csv("src/all_songs.csv") %>%
 data_artists <- read.csv("src/all_artists.csv")
 ```
 
-## Gabarito
-
-```{r}
+```{r warning=F}
 data <- read.csv("src/data_gabarito.csv")
 
 gabarito <- data[1,] %>%
@@ -61,18 +61,14 @@ data_gabarito <- cbind(data_songs, gabarito) %>%
     across(anger:positive, ~ as.numeric(as.character(.))),
     lyrics = data_songs$lyrics
   ) %>%
+  filter(Alink != "/hillsong-united/") %>%
+  distinct(Slink, .keep_all = TRUE)
+
+data_songs <- data_songs %>%
+  filter(Alink != "/hillsong-united/") %>%
   distinct(Slink, .keep_all = TRUE)
 
 rm(data, gabarito)
-```
-
-```{r}
-data_gabarito %>%
-  filter(rowSums((data_gabarito %>% select(anger:positive)) != 0) > 0)
-```
-
-```{r}
-data_songs <- data_songs %>% distinct(Slink, .keep_all = TRUE)
 ```
 
 
@@ -134,7 +130,7 @@ data_gabarito %>%
     total = anger+anticipation+disgust+fear+joy+sadness+surprise+trust+negative+positive,
     across(anger:positive, ~ .x / total)
   ) %>%
-  filter(n >= 20) %>%
+  filter(n >= 50) %>%
   arrange(desc(n)) %>%
   pivot_longer(
     cols = anger:positive,
@@ -155,1440 +151,4145 @@ data_gabarito %>%
 ```
 
 
-## Pacote syuzhet
+## Processamento de dados
 
-[!] Como definir o valor de corte?
-
-```{r}
-syuzhet <- future_map_dfr(data_gabarito$lyrics, ~syuzhet_classification(., 0.05)) %>%
-  mutate(across(everything(), as.factor))
-data_syuzhet <- cbind(data_songs, syuzhet)
-```
-
-### Matriz de confusão
-
-```{r}
-confusionMatrix(
-  unlist(data_syuzhet[, "positive"]),
-  unlist(data_gabarito[, "positive"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "negative"]),
-  unlist(data_gabarito[, "negative"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "anger"]),
-  unlist(data_gabarito[, "anger"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "anticipation"]),
-  unlist(data_gabarito[, "anticipation"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "disgust"]),
-  unlist(data_gabarito[, "disgust"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "fear"]),
-  unlist(data_gabarito[, "fear"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "joy"]),
-  unlist(data_gabarito[, "joy"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "sadness"]),
-  unlist(data_gabarito[, "sadness"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "surprise"]),
-  unlist(data_gabarito[, "surprise"] %>% as.factor())
-)
-
-confusionMatrix(
-  unlist(data_syuzhet[, "trust"]),
-  unlist(data_gabarito[, "trust"] %>% as.factor())
-)
-```
-
-
-## TF IDF
+### TF IDF
 ```{r}
 tfidf <- DocumentTermMatrix(data_gabarito$lyrics) %>% 
   weightTfIdf() %>%
   as.matrix() %>%
   as.data.frame()
 
-data_tfidf <- cbind(tfidf, data_gabarito %>% select(anger:positive))
-colnames(data_tfidf) <- clean_names(colnames(data_tfidf))
-
-data_tfidf <- data_tfidf %>%
-  mutate(across((ncol(data_tfidf)-9):ncol(data_tfidf), ~ as.factor(ifelse(. > 0.5, "Yes", "No"))))
+data_tfidf_raw <- cbind(tfidf, data_gabarito %>% select(anger:positive))
+data_tfidf_raw <- data_tfidf_raw %>%
+  mutate(across((ncol(data_tfidf_raw)-9):ncol(data_tfidf_raw), ~ as.factor(ifelse(. >= 1, "Yes", "No"))))
 ```
 
+### Frequência de músicas nas palavras
+```{r}
+data_tfidf_raw %>%
+  select(1:(ncol(data_tfidf_raw)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  count(frequency)
+```
 
-## Random Forest
+### Limpeza de palavras raras
+```{r}
+useful_words <- data_tfidf_raw %>%
+  select(1:(ncol(data_tfidf_raw)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  filter(frequency >= 3) %>%
+  pull(word)
 
-### Positivo
+data_tfidf <- data_tfidf_raw %>%
+  select(all_of(useful_words), matches(paste0("^", labels_en, "$", collapse = "|")))
+```
+
+### Frequência de palavras nas músicas
+```{r}
+data_tfidf_raw %>%
+  select(all_of(useful_words)) %>%
+  rowwise() %>%
+  mutate(word_count = sum(c_across(everything()) > 0)) %>%
+  ungroup() %>%
+  select(word_count) %>%
+  count(word_count) %>%
+  arrange(desc(n))
+```
+
+### Palavras mais frequentes
+```{r}
+data_tfidf %>%
+  select(1:(ncol(data_tfidf)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  arrange(desc(frequency))
+```
+
+### Exemplo É o amor
+```{r}
+data_tfidf[364,1:971] %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "tfidf") %>%
+  filter(tfidf > 0) %>%
+  arrange(desc(tfidf))
+```
+
+### Divisão treino e teste
 ```{r}
 set.seed(7)
 
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(positive)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(positive ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = positive, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = positive, estimate = .pred_class)
-print(conf_matrix)
+data_split <- initial_split(data_tfidf, prop = 0.8)
+data_train <- training(data_split)
+data_test <- testing(data_split)
 ```
 
 
-### Negativo
+## Positivo
+
+### RF | Manual
 ```{r}
+tic()
 set.seed(7)
 
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(negative)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(positive)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
+# data_split <- initial_split(model_data, prop = 0.8, strata = positive)
+# train_data <- training(data_split)
+# test_data <- testing(data_split)
 
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(negative ~ ., data = train_data) %>%
+rf_recipe <- recipe(positive ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(positive) %>%
+  step_pca(all_predictors(), num_comp = 100)
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = negative, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = negative, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Raiva
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(anger)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(anger ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = anger, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = anger, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Antecipação
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(anticipation)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(anticipation ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = anticipation, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = anticipation, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Desgosto
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(disgust)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(disgust ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = disgust, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = disgust, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Medo
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(fear)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(fear ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = fear, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = fear, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Alegria
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(joy)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(joy ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = joy, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = joy, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Tristeza
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(sadness)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(sadness ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = sadness, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = sadness, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Surpresa
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(surprise)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(surprise ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = surprise, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = surprise, estimate = .pred_class)
-print(conf_matrix)
-```
-
-### Confiança
-```{r}
-set.seed(7)
-
-# Selecionar apenas as colunas de TF-IDF e a coluna de resposta
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(trust)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-# Separar os dados em treino e teste
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar o modelo de random forest
-rf_model <- rand_forest(mode = "classification", trees = 1000) %>%
-  set_engine("ranger")
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(trust ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
-
-# Treinar o modelo
-rf_fit <- wf %>%
-  fit(data = train_data)
-
-# Fazer previsões no conjunto de teste
-predictions <- rf_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = factor(ifelse(.pred_Yes > 0.5, "Yes", "No"), levels = c("No", "Yes")))
-
-# Avaliar o modelo com as métricas personalizadas
-custom_metrics <- metric_set(roc_auc, accuracy, precision, recall, f_meas)
-final_metrics <- custom_metrics(predictions, truth = trust, estimate = .pred_class, .pred_Yes)
-print(final_metrics)
-
-# Calcular a matriz de confusão
-conf_matrix <- conf_mat(predictions, truth = trust, estimate = .pred_class)
-print(conf_matrix)
-```
-
-
-
-
-## Otimização Bayesiana
-
-### Positivo
-```{r}
-set.seed(7)
-
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(positive)
-model_data <- bind_cols(tfidf_cols, response_col)
-
-data_split <- initial_split(model_data, prop = 0.8)
-train_data <- training(data_split)
-test_data <- testing(data_split)
-
-# Especificar a receita de pré-processamento
-recipe <- recipe(positive ~ ., data = train_data) %>%
-  step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
-
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = data_train)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+# importance <- final_model$variable.importance
+# importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+#   arrange(desc(importance))
+# row.names(importance_df) <- NULL
+# print(importance_df %>% head(100))
+# 
+# test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+#   bind_cols(test_data)
+# 
+# roc_auc_result <- test_predictions %>%
+#   roc_auc(truth = positive, .pred_Yes, event_level = "second")
+# print(roc_auc_result)
+# 
+# class_predictions <- predict(final_fit, test_data) %>%
+#   bind_cols(test_data)
+# 
+# metrics <- metric_set(accuracy, precision, recall, f_meas)
+# results <- class_predictions %>%
+#   metrics(truth = positive, estimate = .pred_class)
+# print(results)
+# 
+# class_predictions %>%
+#   conf_mat(truth = positive, estimate = .pred_class) %>%
+#   autoplot(type = "heatmap") +
+#   labs(
+#     title = "Matriz de Confusão",
+#     x = "Verdadeiro",
+#     y = "Predito")
+# 
+# test_predictions %>%
+#   roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+#   ggplot(aes(x = 1-specificity, y = sensitivity)) +
+#   geom_path() +
+#   geom_abline(lty = 3) +
+#   coord_equal() +
+#   labs(title = "",
+#        x = "1 - Especificidade",
+#        y = "Sensibilidade") +
+#   theme_bw()
+
+toc()
+```
+
+```{r}
+values = NULL
+for(i in 1:20) {
+  set.seed(i)
+  final_fit <- fit(rf_wf, data = data_train)
+  final_model <- extract_fit_parsnip(final_fit)$fit
+  
+  test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+    bind_cols(data_test)
+  
+  roc_auc_result <- test_predictions %>%
+    roc_auc(truth = positive, .pred_Yes, event_level = "second")
+  roc_values[i] <- roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(roc_values), "está no índice", which.max(roc_values))
+```
+
+```{r}
+set.seed(9)
+final_fit <- fit(final_wf, data = data_train)
+final_model <- extract_fit_parsnip(final_fit)$fit
+
+test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+  bind_cols(data_test)
+
+cat("ROC AUC:", max(roc_values) %>% round(4), "\n")
+
+res <- pROC::roc(test_predictions$positive, test_predictions$.pred_Yes)
+value <- res$thresholds[which.max(res$sensitivities^2 + res$specificities^2)]
+cat("Acurácia:", (ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% sum() / nrow(test_predictions)) %>% round(4), "\n")
+
+test_predictions_final <- test_predictions %>%
+  mutate(
+    pred = ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% as.factor(),
+    positive = ifelse(positive == "Yes", 1, 0) %>% as.factor()
+  ) %>% select(pred, positive)
+
+confusion_matrix <- confusionMatrix(test_predictions_final$pred, test_predictions_final$positive)
+
+tp <- confusion_matrix$table[1, 1]
+fn <- confusion_matrix$table[2, 1]
+fp <- confusion_matrix$table[1, 2]
+sensibilidade <- tp / (tp + fn)
+precisao <- tp / (tp + fp)
+f_measure <- 2 * (precisao * sensibilidade) / (precisao + sensibilidade)
+
+cat("Sensibilidade:", sensibilidade %>% round(4), "\n")
+cat("Precisão:", precisao %>% round(4), "\n")
+cat("F-Measure:", f_measure %>% round(4), "\n")
+
+test_predictions %>%
+  roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(positive)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = positive)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(positive ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(positive) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
 
-# Otimização bayesiana
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = positive), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = positive, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = positive, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = positive, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = positive, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = positive, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = positive, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(positive)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# data_split <- initial_split(model_data, prop = 0.8, strata = positive)
+# train_data <- training(data_split)
+# test_data <- testing(data_split)
+
+rf_recipe <- recipe(positive ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(positive) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(1, 100)),
+  min_n(range = c(5, 20))
+  # num_comp(range = c(20, 100))
+)
+
 set.seed(7)
 tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
+  rf_wf,
+  resamples = vfold_cv(model_data, v = 5, strata = positive), # Validação cruzada estratificada
   param_info = rf_grid,
+  initial = 10,
+  iter = 100,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE, no_improve = 70)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+# final_fit <- fit(final_wf, data = model_data)
+# final_model <- extract_fit_parsnip(final_fit)$fit
+# print(final_model)
+# 
+# autoplot(tune_results, type = "performance")
+# 
+# importance <- final_model$variable.importance
+# importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+#   arrange(desc(importance))
+# row.names(importance_df) <- NULL
+# print(importance_df %>% head(100))
+# 
+# test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+#   bind_cols(test_data)
+# 
+# roc_auc_result <- test_predictions %>%
+#   roc_auc(truth = positive, .pred_Yes, event_level = "second")
+# print(roc_auc_result)
+# 
+# class_predictions <- predict(final_fit, test_data) %>%
+#   bind_cols(test_data)
+# 
+# metrics <- metric_set(accuracy, precision, recall, f_meas)
+# results <- class_predictions %>%
+#   metrics(truth = positive, estimate = .pred_class)
+# print(results)
+# 
+# class_predictions %>%
+#   conf_mat(truth = positive, estimate = .pred_class) %>%
+#   autoplot(type = "heatmap") +
+#   labs(
+#     title = "Matriz de Confusão",
+#     x = "Verdadeiro",
+#     y = "Predito")
+# 
+# test_predictions %>%
+#   roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+#   ggplot(aes(x = 1-specificity, y = sensitivity)) +
+#   geom_path() +
+#   geom_abline(lty = 3) +
+#   coord_equal() +
+#   labs(title = "",
+#        x = "1 - Especificidade",
+#        y = "Sensibilidade") +
+#   theme_bw()
+
+toc()
+```
+
+### Resultado final
+```{r}
+values = NULL
+for(i in 1:20) {
+  set.seed(i)
+  final_fit <- fit(final_wf, data = data_train)
+  final_model <- extract_fit_parsnip(final_fit)$fit
+  
+  test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+    bind_cols(data_test)
+  
+  roc_auc_result <- test_predictions %>%
+    roc_auc(truth = positive, .pred_Yes, event_level = "second")
+  roc_values[i] <- roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(roc_values), "está no índice", which.max(roc_values))
+```
+
+```{r}
+set.seed(8)
+final_fit <- fit(final_wf, data = data_train)
+final_model <- extract_fit_parsnip(final_fit)$fit
+
+test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+  bind_cols(data_test)
+
+cat("ROC AUC:", max(roc_values) %>% round(4), "\n")
+
+res <- pROC::roc(test_predictions$positive, test_predictions$.pred_Yes)
+value <- res$thresholds[which.max(res$sensitivities^2 + res$specificities^2)]
+cat("Acurácia:", ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% sum() / nrow(test_predictions) %>% round(4), "\n")
+
+test_predictions_final <- test_predictions %>%
+  mutate(
+    pred = ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% as.factor(),
+    positive = ifelse(positive == "Yes", 1, 0) %>% as.factor()
+  ) %>% select(pred, positive)
+
+confusion_matrix <- confusionMatrix(test_predictions_final$pred, test_predictions_final$positive)
+
+tp <- confusion_matrix$table[1, 1]
+fn <- confusion_matrix$table[2, 1]
+fp <- confusion_matrix$table[1, 2]
+sensibilidade <- tp / (tp + fn)
+precisao <- tp / (tp + fp)
+f_measure <- 2 * (precisao * sensibilidade) / (precisao + sensibilidade)
+
+cat("Sensibilidade:", sensibilidade %>% round(4), "\n")
+cat("Precisão:", precisao %>% round(4), "\n")
+cat("F-Measure:", f_measure %>% round(4), "\n")
+
+test_predictions %>%
+  roc_curve(truth = positive, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Negativo
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(negative)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+# data_split <- initial_split(model_data, prop = 0.8, strata = negative)
+# train_data <- training(data_split)
+# test_data <- testing(data_split)
+
+rf_recipe <- recipe(negative ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(negative) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = data_train)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+# importance <- final_model$variable.importance
+# importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+#   arrange(desc(importance))
+# row.names(importance_df) <- NULL
+# print(importance_df %>% head(100))
+# 
+# test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+#   bind_cols(test_data)
+# 
+# roc_auc_result <- test_predictions %>%
+#   roc_auc(truth = negative, .pred_Yes, event_level = "second")
+# print(roc_auc_result)
+# 
+# class_predictions <- predict(final_fit, test_data) %>%
+#   bind_cols(test_data)
+# 
+# metrics <- metric_set(accuracy, precision, recall, f_meas)
+# results <- class_predictions %>%
+#   metrics(truth = negative, estimate = .pred_class)
+# print(results)
+# 
+# class_predictions %>%
+#   conf_mat(truth = negative, estimate = .pred_class) %>%
+#   autoplot(type = "heatmap") +
+#   labs(
+#     title = "Matriz de Confusão",
+#     x = "Verdadeiro",
+#     y = "Predito")
+# 
+# test_predictions %>%
+#   roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+#   ggplot(aes(x = 1-specificity, y = sensitivity)) +
+#   geom_path() +
+#   geom_abline(lty = 3) +
+#   coord_equal() +
+#   labs(title = "",
+#        x = "1 - Especificidade",
+#        y = "Sensibilidade") +
+#   theme_bw()
+
+toc()
+```
+
+### Resultado final
+```{r}
+values = NULL
+for(i in 1:20) {
+  set.seed(i)
+  final_fit <- fit(rf_wf, data = data_train)
+  final_model <- extract_fit_parsnip(final_fit)$fit
+  
+  test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+    bind_cols(data_test)
+  
+  roc_auc_result <- test_predictions %>%
+    roc_auc(truth = negative, .pred_Yes, event_level = "second")
+  roc_values[i] <- roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(roc_values), "está no índice", which.max(roc_values))
+```
+
+```{r}
+set.seed(16)
+final_fit <- fit(final_wf, data = data_train)
+final_model <- extract_fit_parsnip(final_fit)$fit
+
+test_predictions <- predict(final_fit, data_test, type = "prob") %>%
+  bind_cols(data_test)
+
+cat("ROC AUC:", max(roc_values) %>% round(4), "\n")
+
+res <- pROC::roc(test_predictions$negative, test_predictions$.pred_Yes)
+value <- res$thresholds[which.max(res$sensitivities^2 + res$specificities^2)]
+cat("Acurácia:", (ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% sum() / nrow(test_predictions)) %>% round(4), "\n")
+
+test_predictions_final <- test_predictions %>%
+  mutate(
+    pred = ifelse(test_predictions$.pred_Yes > value, 1, 0) %>% as.factor(),
+    negative = ifelse(negative == "Yes", 1, 0) %>% as.factor()
+  ) %>% select(pred, negative)
+
+confusion_matrix <- confusionMatrix(test_predictions_final$pred, test_predictions_final$negative)
+print(confusion_matrix$table)
+
+tp <- confusion_matrix$table[1, 1]
+fn <- confusion_matrix$table[2, 1]
+fp <- confusion_matrix$table[1, 2]
+sensibilidade <- tp / (tp + fn)
+precisao <- tp / (tp + fp)
+f_measure <- 2 * (precisao * sensibilidade) / (precisao + sensibilidade)
+
+cat("Sensibilidade:", sensibilidade %>% round(4), "\n")
+cat("Precisão:", precisao %>% round(4), "\n")
+cat("F-Measure:", f_measure %>% round(4), "\n")
+
+test_predictions %>%
+  roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(negative)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = negative)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(negative ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(negative) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = negative), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = negative, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = negative, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = negative, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = negative, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = negative, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = negative, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(negative)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = negative)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(negative ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(negative) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = negative), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
   iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  metrics = metric_set(yardstick::roc_auc),
   control = control_bayes(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = positive, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = positive, .pred_Yes),
-    final_predictions %>% f_meas(truth = positive, estimate = .pred_class),
-    final_predictions %>% precision(truth = positive, estimate = .pred_class),
-    final_predictions %>% recall(truth = positive, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = negative, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = negative, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = negative, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Negativo
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = negative, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = negative, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = negative, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = negative, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Alegria
+
+### RF | Manual
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(negative)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(joy)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = joy)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(negative ~ ., data = train_data) %>%
+rf_recipe <- recipe(joy ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(joy) %>%
+  step_pca(all_predictors(), num_comp = 100)
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
-  mtry = tune(),
-  min_n = tune()
-) %>% 
-  set_engine("ranger")
+  mtry = 99,
+  trees = 313,
+  min_n = 12
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
-)
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Otimização bayesiana
-set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
-)
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = negative, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = negative, .pred_Yes),
-    final_predictions %>% f_meas(truth = negative, estimate = .pred_class),
-    final_predictions %>% precision(truth = negative, estimate = .pred_class),
-    final_predictions %>% recall(truth = negative, estimate = .pred_class)
-  )
-
-# Mostrar as métricas de avaliação
-print(final_metrics)
-
+toc()
 ```
 
-### Raiva
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(anger)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(joy)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = joy)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(anger ~ ., data = train_data) %>%
+rf_recipe <- recipe(joy ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(joy) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
 
-# Otimização bayesiana
 set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = joy), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = anger, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = anger, .pred_Yes),
-    final_predictions %>% f_meas(truth = anger, estimate = .pred_class),
-    final_predictions %>% precision(truth = anger, estimate = .pred_class),
-    final_predictions %>% recall(truth = anger, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Antecipação
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(anticipation)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(joy)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = joy)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(anticipation ~ ., data = train_data) %>%
+rf_recipe <- recipe(joy ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(joy) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
 rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
-
-# Otimização bayesiana
 set.seed(7)
 tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = joy), # Validação cruzada estratificada
   param_info = rf_grid,
+  initial = 10,
   iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  metrics = metric_set(yardstick::roc_auc),
   control = control_bayes(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = anticipation, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = anticipation, .pred_Yes),
-    final_predictions %>% f_meas(truth = anticipation, estimate = .pred_class),
-    final_predictions %>% precision(truth = anticipation, estimate = .pred_class),
-    final_predictions %>% recall(truth = anticipation, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Desgosto
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = joy, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = joy, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = joy, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = joy, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Antecipação
+
+### RF | Manual
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(disgust)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(anticipation)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = anticipation)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(disgust ~ ., data = train_data) %>%
+rf_recipe <- recipe(anticipation ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(anticipation) %>%
+  step_pca(all_predictors(), num_comp = 100)
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
-  mtry = tune(),
-  min_n = tune()
-) %>% 
-  set_engine("ranger")
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
-)
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Otimização bayesiana
-set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
-)
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = disgust, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = disgust, .pred_Yes),
-    final_predictions %>% f_meas(truth = disgust, estimate = .pred_class),
-    final_predictions %>% precision(truth = disgust, estimate = .pred_class),
-    final_predictions %>% recall(truth = disgust, estimate = .pred_class)
-  )
-
-# Mostrar as métricas de avaliação
-print(final_metrics)
-
+toc()
 ```
 
-### Medo
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(fear)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(anticipation)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = anticipation)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(fear ~ ., data = train_data) %>%
+rf_recipe <- recipe(anticipation ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(anticipation) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
 
-# Otimização bayesiana
 set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = anticipation), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = fear, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = fear, .pred_Yes),
-    final_predictions %>% f_meas(truth = fear, estimate = .pred_class),
-    final_predictions %>% precision(truth = fear, estimate = .pred_class),
-    final_predictions %>% recall(truth = fear, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Alegria
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(joy)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(anticipation)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = anticipation)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(joy ~ ., data = train_data) %>%
+rf_recipe <- recipe(anticipation ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(anticipation) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
 rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
-
-# Otimização bayesiana
 set.seed(7)
 tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = anticipation), # Validação cruzada estratificada
   param_info = rf_grid,
+  initial = 10,
   iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  metrics = metric_set(yardstick::roc_auc),
   control = control_bayes(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = joy, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = joy, .pred_Yes),
-    final_predictions %>% f_meas(truth = joy, estimate = .pred_class),
-    final_predictions %>% precision(truth = joy, estimate = .pred_class),
-    final_predictions %>% recall(truth = joy, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Tristeza
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anticipation, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anticipation, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anticipation, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anticipation, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+
+## Confiança
+
+### RF | Manual
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(sadness)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(trust)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = trust)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(sadness ~ ., data = train_data) %>%
+rf_recipe <- recipe(trust ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(trust) %>%
+  step_pca(all_predictors(), num_comp = 100)
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
-  mtry = tune(),
-  min_n = tune()
-) %>% 
-  set_engine("ranger")
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
-)
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Otimização bayesiana
-set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
-)
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = sadness, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = sadness, .pred_Yes),
-    final_predictions %>% f_meas(truth = sadness, estimate = .pred_class),
-    final_predictions %>% precision(truth = sadness, estimate = .pred_class),
-    final_predictions %>% recall(truth = sadness, estimate = .pred_class)
-  )
-
-# Mostrar as métricas de avaliação
-print(final_metrics)
-
+toc()
 ```
 
-### Surpresa
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(surprise)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(trust)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = trust)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(surprise ~ ., data = train_data) %>%
+rf_recipe <- recipe(trust ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(trust) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
-rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
 
-# Otimização bayesiana
 set.seed(7)
-tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
-  param_info = rf_grid,
-  iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
-  control = control_bayes(verbose = TRUE)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = trust), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = surprise, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = surprise, .pred_Yes),
-    final_predictions %>% f_meas(truth = surprise, estimate = .pred_class),
-    final_predictions %>% precision(truth = surprise, estimate = .pred_class),
-    final_predictions %>% recall(truth = surprise, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
 
-### Confiança
 ```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
 set.seed(7)
 
-tfidf_cols <- data_tfidf %>% select(1:(ncol(data_tfidf)-10))
-response_col <- data_tfidf %>% select(trust)
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(trust)
 model_data <- bind_cols(tfidf_cols, response_col)
 
-data_split <- initial_split(model_data, prop = 0.8)
+data_split <- initial_split(model_data, prop = 0.8, strata = trust)
 train_data <- training(data_split)
 test_data <- testing(data_split)
 
-# Especificar a receita de pré-processamento
-recipe <- recipe(trust ~ ., data = train_data) %>%
+rf_recipe <- recipe(trust ~ ., data = model_data) %>%
   step_zv(all_predictors()) %>%
-  step_normalize(all_predictors())
+  step_normalize(all_predictors()) %>%
+  # step_smote(trust) %>%
+  step_pca(all_predictors(), num_comp = tune())
 
-# Definir o modelo com hiperparâmetros a serem otimizados
 rf_model <- rand_forest(
-  mode = "classification",
-  trees = tune(),
   mtry = tune(),
+  trees = tune(),
   min_n = tune()
-) %>% 
-  set_engine("ranger")
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
 
-# Criar o fluxo de trabalho
-wf <- workflow() %>%
-  add_recipe(recipe) %>%
-  add_model(rf_model)
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
 
-# Definir a grade de hiperparâmetros
 rf_grid <- parameters(
-  trees(range = c(500, 2000)),
-  mtry(range = c(1, ncol(train_data) - 1)),
-  min_n(range = c(1, 10))
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
 )
 
-# Definir a estratégia de resampling
-cv_folds <- vfold_cv(train_data, v = 5)
-
-# Otimização bayesiana
 set.seed(7)
 tune_results <- tune_bayes(
-  wf,
-  resamples = cv_folds,
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = trust), # Validação cruzada estratificada
   param_info = rf_grid,
+  initial = 10,
   iter = 50,
-  metrics = metric_set(roc_auc, accuracy, precision, recall, f_meas),
+  metrics = metric_set(yardstick::roc_auc),
   control = control_bayes(verbose = TRUE)
 )
 
-# Selecionar o melhor conjunto de hiperparâmetros
-best_params <- select_best(tune_results, metric = "accuracy")
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
 
-# Ajustar o melhor modelo
-final_rf_model <- finalize_model(rf_model, best_params)
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
 
-# Atualizar o workflow com os melhores hiperparâmetros
-final_wf <- wf %>%
-  finalize_workflow(best_params)
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
 
-# Treinar o modelo final
-final_fit <- final_wf %>%
-  fit(data = train_data)
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
 
-# Fazer previsões no conjunto de teste
-final_predictions <- final_fit %>%
-  predict(new_data = test_data, type = "prob") %>%
-  bind_cols(test_data) %>%
-  mutate(.pred_class = ifelse(.pred_Yes > 0.5, "Yes", "No"))
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
 
-# Avaliar o modelo final
-final_metrics <- final_predictions %>%
-  metrics(truth = trust, estimate = .pred_class) %>%
-  bind_rows(
-    final_predictions %>% roc_auc(truth = trust, .pred_Yes),
-    final_predictions %>% f_meas(truth = trust, estimate = .pred_class),
-    final_predictions %>% precision(truth = trust, estimate = .pred_class),
-    final_predictions %>% recall(truth = trust, estimate = .pred_class)
-  )
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
 
-# Mostrar as métricas de avaliação
-print(final_metrics)
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
 
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
 ```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = trust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = trust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = trust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = trust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Desgosto
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(disgust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = disgust)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(disgust ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(disgust) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(disgust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = disgust)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(disgust ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(disgust) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = disgust), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(disgust)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = disgust)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(disgust ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(disgust) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = disgust), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
+  iter = 50,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = disgust, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = disgust, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = disgust, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = disgust, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Medo
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(fear)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = fear)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(fear ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(fear) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(fear)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = fear)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(fear ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(fear) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = fear), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(fear)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = fear)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(fear ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(fear) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = fear), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
+  iter = 50,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = fear, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = fear, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = fear, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = fear, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+## Raiva
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = anger)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(anger) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = anger)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(anger) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = anger), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = anger)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(anger) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = anger), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
+  iter = 50,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = anger, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = anger, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = anger, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+## Surpresa
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(surprise)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = surprise)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(surprise ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(surprise) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(surprise)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = surprise)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(surprise ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(surprise) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = surprise), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(surprise)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = surprise)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(surprise ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(surprise) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = surprise), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
+  iter = 50,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = surprise, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = surprise, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = surprise, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = surprise, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+
+## Tristeza
+
+### RF | Manual
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en))) %>% scale()
+response_col <- data_train %>% select(sadness)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = sadness)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(sadness ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(sadness) %>%
+  step_pca(all_predictors(), num_comp = 100)
+
+rf_model <- rand_forest(
+  mtry = 7,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+final_fit <- fit(rf_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(sadness)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = sadness)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(sadness ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(sadness) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- grid_regular(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100)),
+  levels = 5
+)
+
+
+set.seed(7)
+tune_results <- tune_grid(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = sadness), # Validação cruzada estratificada
+  grid = rf_grid,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(7)
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(sadness)
+model_data <- bind_cols(tfidf_cols, response_col)
+
+data_split <- initial_split(model_data, prop = 0.8, strata = sadness)
+train_data <- training(data_split)
+test_data <- testing(data_split)
+
+rf_recipe <- recipe(sadness ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors()) %>%
+  # step_smote(sadness) %>%
+  step_pca(all_predictors(), num_comp = tune())
+
+rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+rf_wf <- workflow() %>%
+  add_model(rf_model) %>%
+  add_recipe(rf_recipe)
+
+rf_grid <- parameters(
+  trees(range = c(100, 500)),
+  mtry(range = c(floor(sqrt(ncol(train_data) - 1)*0.1), floor(sqrt(ncol(train_data) - 1)*1.5))),
+  min_n(range = c(5, 20)),
+  num_comp(range = c(5, 100))
+)
+
+set.seed(7)
+tune_results <- tune_bayes(
+  rf_wf,
+  resamples = vfold_cv(train_data, v = 5, strata = sadness), # Validação cruzada estratificada
+  param_info = rf_grid,
+  initial = 10,
+  iter = 50,
+  metrics = metric_set(yardstick::roc_auc),
+  control = control_bayes(verbose = TRUE)
+)
+
+best_results <- show_best(tune_results, metric = "roc_auc")
+print(best_results)
+
+final_wf <- finalize_workflow(
+  rf_wf,
+  select_best(tune_results, metric = "roc_auc")
+)
+
+final_fit <- fit(final_wf, data = train_data)
+final_model <- extract_fit_parsnip(final_fit)$fit
+print(final_model)
+
+importance <- final_model$variable.importance
+importance_df <- data.frame(Feature = names(importance), Importance = importance) %>%
+  arrange(desc(importance))
+row.names(importance_df) <- NULL
+print(importance_df %>% head(100))
+
+test_predictions <- predict(final_fit, test_data, type = "prob") %>%
+  bind_cols(test_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, test_data) %>%
+  bind_cols(test_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+
+toc()
+```
+
+```{r}
+test_predictions <- predict(final_fit, train_data, type = "prob") %>%
+  bind_cols(train_data)
+
+roc_auc_result <- test_predictions %>%
+  roc_auc(truth = sadness, .pred_Yes, event_level = "second")
+print(roc_auc_result)
+
+class_predictions <- predict(final_fit, train_data) %>%
+  bind_cols(train_data)
+
+metrics <- metric_set(accuracy, precision, recall, f_meas)
+results <- class_predictions %>%
+  metrics(truth = sadness, estimate = .pred_class)
+print(results)
+
+class_predictions %>%
+  conf_mat(truth = sadness, estimate = .pred_class) %>%
+  autoplot(type = "heatmap") +
+  labs(
+    title = "Matriz de Confusão",
+    x = "Verdadeiro",
+    y = "Predito")
+
+test_predictions %>%
+  roc_curve(truth = sadness, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+```{r}
+print("Fim")
+```
+
