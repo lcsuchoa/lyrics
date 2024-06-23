@@ -1,0 +1,428 @@
+---
+title: "Raiva"
+author: "Lucas Uchoa"
+date: "2024-06-21"
+output: html_document
+---
+
+```{r echo=F, include=F}
+source("../src/utils.R")
+
+cl <- makePSOCKcluster(detectCores() - 1)
+registerDoParallel(cl)
+```
+
+```{r}
+set.seed(1)
+
+data_split <- initial_split(data_tfidf, prop = 0.7, strata = anger)
+data_train <- training(data_split) %>%
+  mutate(anger = factor(anger, levels = c("No", "Yes")))
+data_test <- testing(data_split) %>%
+  mutate(anger = factor(anger, levels = c("No", "Yes")))
+
+tfidf_cols <- data_train %>% select(1:(ncol(data_train)-length(labels_en)))
+response_col <- data_train %>% select(anger)
+model_data <- bind_cols(tfidf_cols, response_col)
+```
+
+
+
+### RF | Manual
+```{r}
+tic()
+
+manual_rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+  # step_pca(all_predictors(), num_comp = 100)
+
+manual_rf_model <- rand_forest(
+  mtry = 10,
+  trees = 100,
+  min_n = 50
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+manual_rf_wf <- workflow() %>%
+  add_model(manual_rf_model) %>%
+  add_recipe(manual_rf_recipe)
+
+toc()
+```
+
+```{r}
+manual_roc_values = NULL
+for(i in 1:5) {
+  set.seed(i)
+  manual_final_fit <- fit(manual_rf_wf, data = data_train)
+  
+  manual_test_predictions <- predict(manual_final_fit, data_test, type = "prob") %>%
+    mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+  
+  manual_roc_auc_result <- manual_test_predictions %>%
+    roc_auc(truth = anger, .pred_Yes, event_level = "second")
+  manual_roc_values[i] <- manual_roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(manual_roc_values), "está no índice", which.max(manual_roc_values))
+```
+
+```{r}
+set.seed(which.max(manual_roc_values))
+manual_final_fit <- fit(manual_rf_wf, data = data_train)
+
+manual_test_predictions <- predict(manual_final_fit, data_test, type = "prob") %>%
+  mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+
+manual_res <- pROC::roc(manual_test_predictions$anger, manual_test_predictions$.pred_Yes)
+manual_value <- manual_res$thresholds[which.max(manual_res$sensitivities^2 + manual_res$specificities^2)]
+
+manual_test_predictions_final <- manual_test_predictions %>%
+  mutate(
+    pred = ifelse(manual_test_predictions$.pred_Yes > manual_value, "Yes", "No") %>% factor(levels = c("No", "Yes")),
+    anger = factor(data_test$anger, levels = c("No", "Yes"))
+  ) %>%
+  select(pred, anger)
+
+manual_confusion_matrix <- confusionMatrix(manual_test_predictions_final$pred, manual_test_predictions_final$anger)
+print(manual_confusion_matrix$table)
+
+manual_tp <- manual_confusion_matrix$table[2, 2]
+manual_fn <- manual_confusion_matrix$table[1, 2]
+manual_fp <- manual_confusion_matrix$table[2, 1]
+manual_tn <- manual_confusion_matrix$table[1, 1]
+manual_sensibilidade <- manual_tp / (manual_tp + manual_fn)
+manual_precisao <- manual_tp / (manual_tp + manual_fp)
+manual_f_measure <- 2 * (manual_precisao * manual_sensibilidade) / (manual_precisao + manual_sensibilidade)
+manual_acuracia <- (manual_tp + manual_tn) / sum(manual_confusion_matrix$table)
+
+cat("ROC AUC:", max(manual_roc_values) %>% round(4), "\n")
+cat("Acurácia:", manual_acuracia %>% round(4), "\n")
+cat("Sensibilidade:", manual_sensibilidade %>% round(4), "\n")
+cat("Precisão:", manual_precisao %>% round(4), "\n")
+cat("F-Measure:", manual_f_measure %>% round(4), "\n")
+
+manual_test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+
+### RF | Tune Grid
+```{r}
+tic()
+set.seed(1)
+
+grid_rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+  # step_pca(all_predictors(), num_comp = 100)
+
+grid_rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+grid_rf_wf <- workflow() %>%
+  add_model(grid_rf_model) %>%
+  add_recipe(grid_rf_recipe)
+
+grid_rf_grid <- grid_regular(
+  mtry(range = c(1, ncol(model_data) %>% sqrt() %>% floor())),
+  trees(range = c(1, 500)),
+  min_n(range = c(1, 100)),
+  levels = 5
+)
+
+
+set.seed(1)
+grid_tune_results <- tune_grid(
+  grid_rf_wf,
+  resamples = vfold_cv(model_data, v = 5, strata = anger),
+  grid = grid_rf_grid,
+  metrics = metric_set(roc_auc),
+  control = control_grid(verbose = TRUE)
+)
+
+grid_best_results <- show_best(grid_tune_results, metric = "roc_auc")
+print(grid_best_results)
+
+grid_final_wf <- finalize_workflow(
+  grid_rf_wf,
+  select_best(grid_tune_results, metric = "roc_auc")
+)
+
+toc()
+```
+
+```{r}
+grid_roc_values = NULL
+for(i in 1:20) {
+  set.seed(i)
+  grid_final_fit <- fit(grid_final_wf, data = data_train)
+  
+  grid_test_predictions <- predict(grid_final_fit, data_test, type = "prob") %>%
+    mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+  
+  grid_roc_auc_result <- grid_test_predictions %>%
+    roc_auc(truth = anger, .pred_Yes, event_level = "second")
+  grid_roc_values[i] <- grid_roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(grid_roc_values), "está no índice", which.max(grid_roc_values))
+```
+
+```{r}
+set.seed(which.max(grid_roc_values))
+grid_final_fit <- fit(grid_final_wf, data = data_train)
+
+grid_test_predictions <- predict(grid_final_fit, data_test, type = "prob") %>%
+  mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+
+grid_res <- pROC::roc(grid_test_predictions$anger, grid_test_predictions$.pred_Yes)
+grid_value <- grid_res$thresholds[which.max(grid_res$sensitivities^2 + grid_res$specificities^2)]
+
+grid_test_predictions_final <- grid_test_predictions %>%
+  mutate(
+    pred = ifelse(grid_test_predictions$.pred_Yes > grid_value, "Yes", "No") %>% factor(levels = c("No", "Yes")),
+    anger = factor(data_test$anger, levels = c("No", "Yes"))
+  ) %>%
+  select(pred, anger)
+
+grid_confusion_matrix <- confusionMatrix(grid_test_predictions_final$pred, grid_test_predictions_final$anger)
+print(grid_confusion_matrix$table)
+
+grid_tp <- grid_confusion_matrix$table[2, 2]
+grid_fn <- grid_confusion_matrix$table[1, 2]
+grid_fp <- grid_confusion_matrix$table[2, 1]
+grid_tn <- grid_confusion_matrix$table[1, 1]
+grid_sensibilidade <- grid_tp / (grid_tp + grid_fn)
+grid_precisao <- grid_tp / (grid_tp + grid_fp)
+grid_f_measure <- 2 * (grid_precisao * grid_sensibilidade) / (grid_precisao + grid_sensibilidade)
+grid_acuracia <- (grid_tp + grid_tn) / sum(grid_confusion_matrix$table)
+
+cat("ROC AUC:", max(grid_roc_values) %>% round(4), "\n")
+cat("Acurácia:", grid_acuracia %>% round(4), "\n")
+cat("Sensibilidade:", grid_sensibilidade %>% round(4), "\n")
+cat("Precisão:", grid_precisao %>% round(4), "\n")
+cat("F-Measure:", grid_f_measure %>% round(4), "\n")
+
+grid_test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+
+### RF | Otimização Bayesiana
+```{r}
+tic()
+set.seed(1)
+
+bayes_rf_recipe <- recipe(anger ~ ., data = model_data) %>%
+  step_zv(all_predictors()) %>%
+  step_normalize(all_predictors())
+  # step_pca(all_predictors(), num_comp = 100)
+
+bayes_rf_model <- rand_forest(
+  mtry = tune(),
+  trees = tune(),
+  min_n = tune()
+) %>%
+  set_engine("ranger", importance = "impurity") %>%
+  set_mode("classification")
+
+bayes_rf_wf <- workflow() %>%
+  add_model(bayes_rf_model) %>%
+  add_recipe(bayes_rf_recipe)
+
+bayes_rf_grid <- parameters(
+  mtry(range = c(1, ncol(model_data) %>% sqrt() %>% floor())),
+  trees(range = c(1, 500)),
+  min_n(range = c(1, 100))
+)
+
+set.seed(1)
+bayes_tune_results <- tune_bayes(
+  bayes_rf_wf,
+  resamples = vfold_cv(model_data, v = 5, strata = anger),
+  param_info = bayes_rf_grid,
+  initial = 10,
+  iter = 100,
+  metrics = metric_set(roc_auc),
+  control = control_bayes(verbose = TRUE, no_improve = 20)
+)
+
+bayes_best_results <- show_best(bayes_tune_results, metric = "roc_auc")
+print(bayes_best_results)
+
+bayes_final_wf <- finalize_workflow(
+  bayes_rf_wf,
+  select_best(bayes_tune_results, metric = "roc_auc")
+)
+
+autoplot(bayes_tune_results, type = "performance")
+
+toc()
+```
+
+```{r}
+bayes_roc_values = NULL
+for(i in 1:20) {
+  set.seed(i)
+  bayes_final_fit <- fit(bayes_final_wf, data = data_train)
+  
+  bayes_test_predictions <- predict(bayes_final_fit, data_test, type = "prob") %>%
+    mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+  
+  bayes_roc_auc_result <- bayes_test_predictions %>%
+    roc_auc(truth = anger, .pred_Yes, event_level = "second")
+  bayes_roc_values[i] <- bayes_roc_auc_result$.estimate
+}
+cat("Melhor ROC AUC:", max(bayes_roc_values), "está no índice", which.max(bayes_roc_values))
+```
+
+```{r}
+set.seed(which.max(bayes_roc_values))
+bayes_final_fit <- fit(bayes_final_wf, data = data_train)
+
+bayes_test_predictions <- predict(bayes_final_fit, data_test, type = "prob") %>%
+    mutate(anger = factor(data_test$anger, levels = c("No", "Yes")))
+
+bayes_res <- pROC::roc(bayes_test_predictions$anger, bayes_test_predictions$.pred_Yes)
+bayes_value <- bayes_res$thresholds[which.max(bayes_res$sensitivities^2 + bayes_res$specificities^2)]
+
+bayes_test_predictions_final <- bayes_test_predictions %>%
+  mutate(
+    pred = ifelse(bayes_test_predictions$.pred_Yes > bayes_value, "Yes", "No") %>% factor(levels = c("No", "Yes")),
+    anger = factor(data_test$anger, levels = c("No", "Yes"))
+  ) %>%
+  select(pred, anger)
+
+bayes_confusion_matrix <- confusionMatrix(bayes_test_predictions_final$pred, bayes_test_predictions_final$anger)
+print(bayes_confusion_matrix$table)
+
+bayes_tp <- bayes_confusion_matrix$table[2, 2]
+bayes_fn <- bayes_confusion_matrix$table[1, 2]
+bayes_fp <- bayes_confusion_matrix$table[2, 1]
+bayes_tn <- bayes_confusion_matrix$table[1, 1]
+bayes_sensibilidade <- bayes_tp / (bayes_tp + bayes_fn)
+bayes_precisao <- bayes_tp / (bayes_tp + bayes_fp)
+bayes_f_measure <- 2 * (bayes_precisao * bayes_sensibilidade) / (bayes_precisao + bayes_sensibilidade)
+bayes_acuracia <- (bayes_tp + bayes_tn) / sum(bayes_confusion_matrix$table)
+
+cat("ROC AUC:", max(bayes_roc_values) %>% round(4), "\n")
+cat("Acurácia:", bayes_acuracia %>% round(4), "\n")
+cat("Sensibilidade:", bayes_sensibilidade %>% round(4), "\n")
+cat("Precisão:", bayes_precisao %>% round(4), "\n")
+cat("F-Measure:", bayes_f_measure %>% round(4), "\n")
+
+bayes_test_predictions %>%
+  roc_curve(truth = anger, .pred_Yes, event_level = "second") %>%
+  ggplot(aes(x = 1-specificity, y = sensitivity)) +
+  geom_path() +
+  geom_abline(lty = 3) +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade") +
+  theme_bw()
+```
+
+
+
+## Syuzhet
+```{r}
+tic()
+
+conf_matrix <- list()
+syuzhet_accuracy <- numeric()
+syuzhet_precision <- numeric()
+syuzhet_sensibility <- numeric()
+syuzhet_f1 <- numeric()
+
+for(i in 1:5) {
+  k = i/5
+  syuzhet <- future_map_dfr(data_gabarito$lyrics, ~syuzhet_classification(., k)) %>%
+    mutate(across(everything(), as.factor))
+  data_syuzhet <- cbind(data_songs, syuzhet)
+  
+  predicted <- as.numeric(as.character(data_syuzhet$anger))
+  actual <- as.numeric(as.character(data_gabarito$anger))
+  conf_matrix <- confusionMatrix(as.factor(predicted), as.factor(actual))
+  
+  syuzhet_accuracy[i] <- conf_matrix$overall['Accuracy']
+  syuzhet_precision[i] <- conf_matrix$byClass['Pos Pred Value']
+  syuzhet_sensibility[i] <- conf_matrix$byClass['Sensitivity']
+  syuzhet_f1[i] <- conf_matrix$byClass['F1']
+}
+
+cat("A melhor acurácia foi de", max(syuzhet_accuracy), "com a limiar no valor de", which.max(syuzhet_accuracy), "\n")
+cat("Acurácia:", max(syuzhet_accuracy) %>% round(4), "\n")
+cat("Sensibilidade:", max(syuzhet_sensibility) %>% round(4), "\n")
+cat("Precisão:", max(syuzhet_precision) %>% round(4), "\n")
+cat("F-Measure:", max(syuzhet_f1) %>% round(4), "\n")
+
+toc()
+```
+
+
+
+## Curvas ROC
+```{r}
+bind_rows(
+  data.frame(
+    model = "Definição manual",
+    specificity = 1 - manual_res$specificities,
+    sensitivity = manual_res$sensitivities
+  ),
+  data.frame(
+    model = "Busca em grade",
+    specificity = 1 - grid_res$specificities,
+    sensitivity = grid_res$sensitivities
+  ),
+  data.frame(
+    model = "Otimização Bayesiana",
+    specificity = 1 - bayes_res$specificities,
+    sensitivity = bayes_res$sensitivities
+  )) %>%
+  ggplot(aes(x = specificity, y = sensitivity, color = model)) +
+  geom_line(size = 1) +
+  geom_abline(linetype = "dashed") +
+  coord_equal() +
+  labs(title = "",
+       x = "1 - Especificidade",
+       y = "Sensibilidade",
+       color = "Modelos") +
+  scale_color_manual(values = c("Definição manual" = "gold", "Busca em grade" = "darkorange", "Otimização Bayesiana" = "darkblue")) +
+  theme_minimal()
+```
+
+
+
+```{r}
+stopCluster(cl)
+```
+
+```{r}
+print("Fim")
+```
+

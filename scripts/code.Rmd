@@ -1,0 +1,217 @@
+---
+title: "Classificação de emoções e sentimentos em letras musicais usando Floresta Aleatória e Otimização Bayesiana"
+date: "Última atualização em `r format(Sys.time(), '%d %B, %Y')`"
+output:
+  html_document:
+    theme: simplex
+    css: src/style.css
+    toc: true
+    toc_float:
+      smooth_scroll: false
+editor_options: 
+  chunk_output_type: inline
+---
+
+```{r echo=F, include=F}
+source("../src/utils.R")
+```
+
+## Leitura dos dados
+
+```{r}
+data_songs <- read.csv("src/all_songs.csv") %>%
+  select(-X) %>%
+  mutate(
+    lyrics = Slyrics %>%
+      gsub("\\d+", "", .) %>%
+      tolower() %>%
+      gsub("[[:punct:]]", "", .) %>%
+      remove_stopwords() %>%
+      as.character()
+  )
+
+data_artists <- read.csv("src/all_artists.csv")
+```
+
+```{r warning=F}
+data <- read.csv("src/data_gabarito.csv")
+
+gabarito <- data[1,] %>%
+  t() %>%
+  as.data.frame() %>%
+  rename(sentimentos = 1) %>%
+  mutate(
+    anger = ifelse(grepl("Raiva", sentimentos), 1, 0),
+    anticipation = ifelse(grepl("Antecipação", sentimentos), 1, 0),
+    disgust = ifelse(grepl("Desgosto", sentimentos), 1, 0),
+    fear = ifelse(grepl("Medo", sentimentos), 1, 0),
+    joy = ifelse(grepl("Alegria", sentimentos), 1, 0),
+    sadness = ifelse(grepl("Tristeza", sentimentos), 1, 0),
+    surprise = ifelse(grepl("Surpresa", sentimentos), 1, 0),
+    trust = ifelse(grepl("Confiança", sentimentos), 1, 0),
+    negative = ifelse(grepl("Negativo", sentimentos), 1, 0),
+    positive = ifelse(grepl("Positivo", sentimentos), 1, 0),
+  ) %>%
+  select(-sentimentos) %>%
+  mutate(across(everything(), as.factor))
+
+row.names(gabarito) <- NULL
+data_gabarito <- cbind(data_songs, gabarito) %>%
+  mutate(
+    across(anger:positive, ~ as.numeric(as.character(.))),
+    lyrics = data_songs$lyrics
+  ) %>%
+  filter(Alink != "/hillsong-united/") %>%
+  distinct(Slink, .keep_all = TRUE)
+
+data_songs <- data_songs %>%
+  filter(Alink != "/hillsong-united/") %>%
+  distinct(Slink, .keep_all = TRUE)
+
+rm(data, gabarito)
+```
+
+
+## Análise exploratória
+
+##### Frequência de músicas anotadas por sentimento
+```{r}
+data_gabarito %>%
+  reframe(across(anger:positive, sum)) %>%
+  pivot_longer(cols = everything(), names_to = "sentimento", values_to = "count") %>%
+  mutate(sentimento = labels_pt[sentimento]) %>%
+  arrange(desc(count)) %>%
+  mutate(sentimento = factor(sentimento, levels = sentimento)) %>%
+  ggplot(aes(x = sentimento, y = count)) +
+  geom_bar(stat = "identity", fill = "darkblue") +
+  geom_text(aes(label = count), vjust = 2, size = 3, color = "white") + 
+  scale_y_continuous(limits = c(0, 300)) +
+  theme_minimal() +
+  labs(x = "", y = "Frequência", title = "") +
+  theme(axis.text.x = element_text())
+```
+
+##### Matriz de correlação entre sentimentos
+```{r}
+correlation_matrix <- cor(data_gabarito %>% select(anger:positive))
+hc <- hclust(dist(1 - correlation_matrix))
+ordered_matrix <- correlation_matrix[hc$order, hc$order]
+long_correlation_matrix <- melt(ordered_matrix)
+
+long_correlation_matrix %>%
+  ggplot(aes(x = Var2, y = Var1, fill = value)) +
+  geom_tile() +
+  scale_fill_gradient2(name = "Correlação",  mid = "white",  high = "darkblue",
+                       low = "darkorange",  midpoint = 0, limit = c(-1, 1), 
+                       breaks = c(-1, -0.5, 0, 0.5, 1)) +
+  theme_minimal() +
+  labs(x = "", y = "") +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1, vjust = 1), 
+        axis.text.y = element_text(hjust = 1)) +
+  scale_x_discrete(labels = labels_pt) +
+  scale_y_discrete(labels = labels_pt)
+
+rm(correlation_matrix, hc, ordered_matrix, long_correlation_matrix)
+```
+
+##### Proporção de sentimentos por gênero
+```{r}
+data_gabarito %>%
+  left_join(data_artists, by="Alink") %>%
+  select(-c(X, Asongs, Apopularity)) %>%
+  distinct() %>%
+  separate_rows(Agenres, sep = ";\\s*") %>%
+  group_by(Agenres) %>%
+  reframe(
+    n = n(),
+    across(anger:positive, mean)
+  ) %>%
+  mutate(
+    total = anger+anticipation+disgust+fear+joy+sadness+surprise+trust+negative+positive,
+    across(anger:positive, ~ .x / total)
+  ) %>%
+  filter(n >= 50) %>%
+  arrange(desc(n)) %>%
+  pivot_longer(
+    cols = anger:positive,
+    names_to = "sentiment",
+    values_to = "percentage"
+  ) %>%
+  mutate(sentiment = factor(sentiment, levels = c("positive", "joy", "trust", "surprise", "anticipation", "fear", "anger", "sadness", "disgust", "negative"))) %>%
+  ggplot(aes(x = Agenres, y = percentage, fill = sentiment)) +
+  geom_bar(stat = "identity") +
+  geom_text(aes(label = scales::percent(percentage, accuracy = 1)), 
+            position = position_stack(vjust = 0.5), 
+            color = "white", 
+            size = 3) +
+  scale_fill_manual(values = colorRampPalette(colors = c("darkblue", "darkgrey", "darkorange"))(10), labels = labels_pt) +
+  scale_y_continuous(labels = scales::percent_format()) +
+  labs(x = "Gênero", y = "Percentual do Sentimento", fill = "Sentimento") +
+  theme_minimal()
+```
+
+
+## Processamento de dados
+
+### TF IDF
+```{r}
+tfidf <- DocumentTermMatrix(data_gabarito$lyrics) %>% 
+  weightTfIdf() %>%
+  as.matrix() %>%
+  as.data.frame()
+
+data_tfidf_raw <- cbind(tfidf, data_gabarito %>% select(anger:positive))
+data_tfidf_raw <- data_tfidf_raw %>%
+  mutate(across((ncol(data_tfidf_raw)-9):ncol(data_tfidf_raw), ~ as.factor(ifelse(. >= 1, "Yes", "No"))))
+```
+
+### Frequência de músicas nas palavras
+```{r}
+data_tfidf_raw %>%
+  select(1:(ncol(data_tfidf_raw)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  count(frequency)
+```
+
+### Limpeza de palavras raras
+```{r}
+useful_words <- data_tfidf_raw %>%
+  select(1:(ncol(data_tfidf_raw)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  filter(frequency >= 3) %>%
+  pull(word)
+
+data_tfidf <- data_tfidf_raw %>%
+  select(all_of(useful_words), matches(paste0("^", labels_en, "$", collapse = "|")))
+```
+
+### Frequência de palavras nas músicas
+```{r}
+data_tfidf_raw %>%
+  select(all_of(useful_words)) %>%
+  rowwise() %>%
+  mutate(word_count = sum(c_across(everything()) > 0)) %>%
+  ungroup() %>%
+  select(word_count) %>%
+  count(word_count) %>%
+  arrange(desc(n))
+```
+
+### Palavras mais frequentes
+```{r}
+data_tfidf %>%
+  select(1:(ncol(data_tfidf)-10)) %>%
+  reframe(across(everything(), ~ sum(. > 0))) %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "frequency") %>%
+  arrange(desc(frequency))
+```
+
+### Exemplo É o amor
+```{r}
+data_tfidf[364,1:971] %>%
+  pivot_longer(cols = everything(), names_to = "word", values_to = "tfidf") %>%
+  filter(tfidf > 0) %>%
+  arrange(desc(tfidf))
+```
